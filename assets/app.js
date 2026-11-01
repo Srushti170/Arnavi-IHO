@@ -1,0 +1,904 @@
+// IHO GK mock test platform: home, instructions, timed exam, result and solutions.
+// Progress and results are kept in this browser's localStorage, so a refresh never loses a running test.
+(() => {
+  "use strict";
+
+  const DURATION_MS = 40 * 60 * 1000;
+  const FIVE_MIN = 5 * 60 * 1000;
+  const ONE_MIN = 60 * 1000;
+  const CANDIDATE = "Arnavi Maurya";
+  const FIRST_NAME = "Arnavi";
+  const KEYS = { session: "ihogk.session.v1", attempts: "ihogk.attempts.v1" };
+  const LETTERS = ["A", "B", "C", "D"];
+  const STATUS_ORDER = ["not-visited", "not-answered", "answered", "marked", "answered-marked"];
+  const STATUS_LABEL = {
+    "not-visited": "Not Visited",
+    "not-answered": "Not Answered",
+    "answered": "Answered",
+    "marked": "Marked for Review",
+    "answered-marked": "Answered & Marked for Review"
+  };
+
+  const CHAPTERS = window.IHO_DATA.chapters;
+  const TESTS = window.IHO_DATA.tests.map(buildTest);
+  const app = document.getElementById("app");
+
+  // ---------- storage (best effort: the app keeps working in memory if storage is blocked) ----------
+  function load(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw == null ? fallback : JSON.parse(raw);
+    } catch (e) {
+      return fallback;
+    }
+  }
+  function save(key, value) {
+    try {
+      if (value == null) localStorage.removeItem(key);
+      else localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) { /* storage unavailable */ }
+  }
+
+  const store = {
+    attempts: load(KEYS.attempts, []),
+    session: load(KEYS.session, null)
+  };
+  if (!Array.isArray(store.attempts)) store.attempts = [];
+
+  const ui = { view: "home", testId: null, attemptId: null, filter: "all", paletteOpen: false };
+  let ticker = null;
+  let warned = {};
+
+  // ---------- test building ----------
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function shuffle(list, rand) {
+    const a = list.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+  function firstNumber(s) {
+    const m = String(s).match(/\d+/);
+    return m ? Number(m[0]) : NaN;
+  }
+
+  function buildTest(raw) {
+    const rand = mulberry32(raw.id * 7919 + 17);
+    const items = raw.sectionA.map(q => ({ ...q, section: 0 }))
+      .concat(raw.sectionB.map(q => ({ ...q, section: 1 })));
+    // Numeric options stay in ascending order; the other questions fill A–D so that each letter
+    // is the correct answer about equally often. The same test always shows the same order.
+    const sorted = items.map(item => {
+      const all = [item.a, ...item.w];
+      if (!all.every(s => !Number.isNaN(firstNumber(s)))) return null;
+      return all.sort((x, y) => firstNumber(x) - firstNumber(y));
+    });
+    const used = [0, 0, 0, 0];
+    sorted.forEach((opts, i) => { if (opts) used[opts.indexOf(items[i].a)]++; });
+    const slots = [];
+    while (slots.length < sorted.filter(o => !o).length) {
+      const p = used.indexOf(Math.min(...used));
+      used[p]++;
+      slots.push(p);
+    }
+    const freeSlots = shuffle(slots, rand);
+    const questions = items.map((item, i) => {
+      let options = sorted[i];
+      if (!options) {
+        options = shuffle(item.w, rand);
+        options.splice(freeSlots.pop(), 0, item.a);
+      }
+      return {
+        n: i + 1,
+        section: item.section,
+        chapter: item.c,
+        text: item.q,
+        options,
+        answer: options.indexOf(item.a),
+        explanation: item.e
+      };
+    });
+    const countA = raw.sectionA.length;
+    return {
+      id: raw.id,
+      code: raw.code,
+      title: raw.title,
+      questions,
+      sections: [
+        { name: "Section A", start: 0, end: countA - 1 },
+        { name: "Section B", start: countA, end: questions.length - 1 }
+      ]
+    };
+  }
+
+  // ---------- helpers ----------
+  const getTest = id => TESTS.find(t => t.id === id);
+  const findAttempt = id => store.attempts.find(a => a.id === id);
+  const sizeOf = s => s.end - s.start + 1;
+  const range = (a, b) => Array.from({ length: b - a + 1 }, (_, k) => a + k);
+  const pad = n => String(n).padStart(2, "0");
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  function clock(ms) {
+    const s = Math.max(0, Math.ceil(ms / 1000));
+    return pad(Math.floor(s / 60)) + ":" + pad(s % 60);
+  }
+  function spent(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    const m = Math.floor(s / 60);
+    return m ? `${m} min ${pad(s % 60)} s` : `${s} s`;
+  }
+  function when(ts) {
+    return new Date(ts).toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
+  }
+  function initial(name) {
+    return esc((name || "?").trim().charAt(0).toUpperCase() || "?");
+  }
+
+  function grade(test, answers) {
+    const res = {
+      correct: 0, wrong: 0, skipped: 0, total: test.questions.length,
+      sections: test.sections.map(s => ({ name: s.name, total: sizeOf(s), correct: 0, wrong: 0, skipped: 0 })),
+      chapters: {}
+    };
+    test.questions.forEach((q, i) => {
+      const a = answers[i];
+      const sec = res.sections[q.section];
+      const ch = res.chapters[q.chapter] || (res.chapters[q.chapter] = { total: 0, correct: 0 });
+      ch.total++;
+      if (a == null) { res.skipped++; sec.skipped++; }
+      else if (a === q.answer) { res.correct++; sec.correct++; ch.correct++; }
+      else { res.wrong++; sec.wrong++; }
+    });
+    res.score = res.correct;
+    return res;
+  }
+
+  // ---------- session ----------
+  function persistSession() { save(KEYS.session, store.session); }
+
+  function statusOf(i) {
+    const s = store.session;
+    const answered = s.answers[i] != null;
+    const marked = !!s.marked[i];
+    if (answered && marked) return "answered-marked";
+    if (marked) return "marked";
+    if (answered) return "answered";
+    return s.visited[i] ? "not-answered" : "not-visited";
+  }
+  function countStatus(from, to) {
+    const counts = {};
+    STATUS_ORDER.forEach(k => { counts[k] = 0; });
+    for (let i = from; i <= to; i++) counts[statusOf(i)]++;
+    return counts;
+  }
+
+  function startTest(testId) {
+    const now = Date.now();
+    store.session = { testId, startedAt: now, endsAt: now + DURATION_MS, current: 0, answers: {}, marked: {}, visited: { 0: true } };
+    warned = {};
+    persistSession();
+    ui.view = "exam";
+    ui.testId = testId;
+    ui.paletteOpen = false;
+    render();
+  }
+
+  function submitTest(auto) {
+    const s = store.session;
+    if (!s) return;
+    stopTicker();
+    const t = getTest(s.testId);
+    const answers = t.questions.map((_, i) => (s.answers[i] == null ? null : s.answers[i]));
+    const end = Math.min(Date.now(), s.endsAt);
+    const attempt = {
+      id: Date.now(),
+      testId: t.id,
+      name: CANDIDATE,
+      startedAt: s.startedAt,
+      submittedAt: end,
+      timeTaken: end - s.startedAt,
+      answers,
+      score: grade(t, answers).score,
+      total: t.questions.length,
+      auto: !!auto
+    };
+    store.attempts.push(attempt);
+    save(KEYS.attempts, store.attempts);
+    store.session = null;
+    persistSession();
+    closeModal();
+    ui.view = "result";
+    ui.attemptId = attempt.id;
+    ui.testId = t.id;
+    render();
+    if (auto) {
+      showModal({
+        title: "Time is up!",
+        body: "<p>Your 40 minutes are over, so your answers were submitted automatically.</p>",
+        actions: [{ label: "See my result", action: "closeModal", kind: "primary" }]
+      });
+    }
+  }
+
+  // ---------- timer ----------
+  function startTicker() {
+    stopTicker();
+    tick();
+    ticker = setInterval(tick, 500);
+  }
+  function stopTicker() {
+    if (ticker) clearInterval(ticker);
+    ticker = null;
+  }
+  function tick() {
+    const s = store.session;
+    if (!s) return stopTicker();
+    const left = s.endsAt - Date.now();
+    const value = document.getElementById("timerValue");
+    const box = document.getElementById("timer");
+    if (value) value.textContent = clock(left);
+    if (box) {
+      box.classList.toggle("is-low", left <= FIVE_MIN && left > ONE_MIN);
+      box.classList.toggle("is-critical", left <= ONE_MIN);
+    }
+    if (left <= FIVE_MIN && left > ONE_MIN && !warned.five) {
+      warned.five = true;
+      toast("5 minutes left. Check the questions you have not answered.");
+    }
+    if (left <= ONE_MIN && left > 0 && !warned.one) {
+      warned.one = true;
+      toast("Last 1 minute!");
+    }
+    if (left <= 0) submitTest(true);
+  }
+
+  // ---------- shared pieces ----------
+  function topbar() {
+    return `<header class="topbar"><div class="topbar-inner">
+      <div class="brand"><span class="seal" aria-hidden="true">GK</span>
+        <div><strong>IHO General Knowledge</strong><span>Grade III · Practice Tests</span></div></div>
+      <div class="cand-chip"><span class="avatar" aria-hidden="true">${initial(CANDIDATE)}</span><span>${CANDIDATE}</span></div>
+    </div></header>`;
+  }
+
+  function legendItems(counts) {
+    return STATUS_ORDER.map(s => `<li><span class="pq st-${s}" aria-hidden="true">${counts ? counts[s] : ""}</span><span>${STATUS_LABEL[s]}</span></li>`).join("");
+  }
+
+  // ---------- home ----------
+  function renderHome() {
+    const cards = TESTS.map(t => {
+      const mine = store.attempts.filter(a => a.testId === t.id);
+      const best = mine.reduce((m, a) => Math.max(m, a.score), 0);
+      const last = mine[mine.length - 1];
+      const live = store.session && store.session.testId === t.id;
+      const total = t.questions.length;
+      let status = `<span class="pill">Not attempted</span>`;
+      if (live) status = `<span class="pill pill-live">In progress · ${clock(store.session.endsAt - Date.now())} left</span>`;
+      else if (mine.length) status = `<span class="pill pill-done">Best ${best}/${total} · ${mine.length} attempt${mine.length > 1 ? "s" : ""}</span>`;
+      return `<article class="test-card">
+        <div class="test-card-top"><span class="test-code">${t.code}</span>${status}</div>
+        <h3>${t.title}</h3>
+        <dl class="test-facts">
+          <div><dt>Questions</dt><dd>${total}</dd></div>
+          <div><dt>Marks</dt><dd>${total}</dd></div>
+          <div><dt>Time</dt><dd>40 min</dd></div>
+        </dl>
+        <p class="test-split">${t.sections.map(s => `${s.name}: ${sizeOf(s)}`).join(" · ")}</p>
+        <div class="test-actions">
+          ${live
+            ? `<button class="btn primary" data-action="resume">Resume test</button>`
+            : `<button class="btn primary" data-action="instructions" data-test="${t.id}">${mine.length ? "Retake test" : "Start test"}</button>`}
+          ${last ? `<button class="btn ghost" data-action="result" data-attempt="${last.id}">Last result</button>` : ""}
+        </div>
+      </article>`;
+    }).join("");
+
+    const recent = store.attempts.slice().reverse().slice(0, 8);
+    const history = recent.length
+      ? `<div class="table-wrap"><table class="data">
+          <thead><tr><th>Date</th><th>Test</th><th>Score</th><th>Time taken</th><th><span class="sr-only">Result</span></th></tr></thead>
+          <tbody>${recent.map(a => {
+            const t = getTest(a.testId);
+            return `<tr><td>${when(a.submittedAt)}</td><td>${t ? t.title : "Test"}</td>
+              <td class="num"><strong>${a.score}</strong>/${a.total}</td><td class="num">${spent(a.timeTaken)}</td>
+              <td class="row-action"><button class="link" data-action="result" data-attempt="${a.id}">View</button></td></tr>`;
+          }).join("")}</tbody></table></div>`
+      : `<p class="empty">Your scores will appear here after you finish a test.</p>`;
+
+    return topbar() + `<main class="page home">
+      <section class="welcome">
+        <div>
+          <p class="eyebrow">Grade III · General Knowledge</p>
+          <h1>Ready for practice, ${FIRST_NAME}?</h1>
+          <p class="lead">Three full mock tests made from your study notes. Each one runs like the real exam: 40 questions, a 40-minute timer, a question palette and instant results with solutions.</p>
+        </div>
+        <div class="cand-card">
+          <span class="avatar avatar-lg" aria-hidden="true">${initial(CANDIDATE)}</span>
+          <div>
+            <span class="k">Candidate</span>
+            <strong>${CANDIDATE}</strong>
+            <span class="s">Grade III · ${store.attempts.length} test${store.attempts.length === 1 ? "" : "s"} taken</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="pattern" aria-label="Exam pattern">
+        <div><span class="k">Questions</span><span class="v">40</span><span class="s">Section A 30 · Section B 10</span></div>
+        <div><span class="k">Marks</span><span class="v">40</span><span class="s">1 mark per question</span></div>
+        <div><span class="k">Time</span><span class="v">40:00</span><span class="s">Submits itself at 00:00</span></div>
+        <div><span class="k">Options</span><span class="v">4</span><span class="s">Only one is correct</span></div>
+      </section>
+
+      <section class="block">
+        <h2>Mock tests</h2>
+        <div class="tests">${cards}</div>
+      </section>
+
+      <section class="block">
+        <h2>Chapters covered</h2>
+        <ul class="syllabus">
+          <li><strong>Section A</strong> ${["india", "world", "sports", "science"].map(k => `<span class="chip">${CHAPTERS[k]}</span>`).join("")}</li>
+          <li><strong>Section B</strong> <span class="chip">${CHAPTERS.iqea}: emergency numbers, healthy habits, mental maths, brain teasers</span></li>
+        </ul>
+      </section>
+
+      <section class="block">
+        <h2>Recent attempts</h2>
+        ${history}
+      </section>
+
+      <p class="footnote">Unofficial practice tests made from the Grade III IHO General Knowledge study notes. Scores are saved only in this browser.</p>
+    </main>`;
+  }
+
+  // ---------- instructions ----------
+  function renderInstructions() {
+    const t = getTest(ui.testId);
+    const [secA, secB] = t.sections;
+    return topbar() + `<main class="page instructions">
+      <div><button class="link" data-action="home">← All tests</button></div>
+      <section class="admit" aria-label="Admit card">
+        <div class="admit-head"><span>Admit card</span><span class="test-code">${t.code}</span></div>
+        <dl class="admit-grid">
+          <div><dt>Candidate</dt><dd>${CANDIDATE}</dd></div>
+          <div><dt>Test</dt><dd>${t.title}</dd></div>
+          <div><dt>Subject</dt><dd>General Knowledge · Grade III</dd></div>
+          <div><dt>Duration</dt><dd>40 minutes</dd></div>
+          <div><dt>Questions</dt><dd>${t.questions.length} (A: ${sizeOf(secA)}, B: ${sizeOf(secB)})</dd></div>
+          <div><dt>Maximum marks</dt><dd>${t.questions.length}</dd></div>
+        </dl>
+      </section>
+
+      <div class="instr-grid">
+        <section class="card">
+          <h2>General instructions</h2>
+          <ol class="rules">
+            <li>The test has ${t.questions.length} questions. <strong>Section A</strong> has ${sizeOf(secA)} questions and <strong>Section B</strong> has ${sizeOf(secB)} questions.</li>
+            <li>Each question carries <strong>1 mark</strong>. There is no negative marking in this practice test.</li>
+            <li>Every question has four options (A, B, C, D). Only one option is correct.</li>
+            <li>You have <strong>40 minutes</strong>. The timer at the top right shows the time left. When it reaches 00:00, the test is submitted automatically.</li>
+            <li>Move between questions with <strong>Previous</strong> and <strong>Save &amp; Next</strong>, the section tabs, or by clicking a number in the question palette.</li>
+            <li>Your answer is saved as soon as you click an option. Click <strong>Clear Response</strong> to remove it.</li>
+            <li>Click <strong>Mark for Review &amp; Next</strong> to come back to a question later. Marked questions that have an answer are still counted. <strong>Save &amp; Next</strong> removes the review mark.</li>
+            <li>Click <strong>Submit Test</strong> when you finish. You will see your score straight away, with the correct answer and an explanation for every question.</li>
+          </ol>
+        </section>
+        <section class="card">
+          <h2>Question palette</h2>
+          <p class="muted">The palette shows the status of every question:</p>
+          <ul class="legend legend-lg">${legendItems(null)}</ul>
+          <h2>Keyboard shortcuts</h2>
+          <ul class="keys">
+            <li><kbd>A</kbd> <kbd>B</kbd> <kbd>C</kbd> <kbd>D</kbd> choose an option</li>
+            <li><kbd>→</kbd> Save &amp; Next</li>
+            <li><kbd>←</kbd> Previous question</li>
+          </ul>
+        </section>
+      </div>
+
+      <label class="agree" for="agree"><input type="checkbox" id="agree"> I have read the instructions. I will not look at my notes or books during the test.</label>
+      <div class="actions">
+        <button class="btn ghost" data-action="home">Back</button>
+        <button class="btn primary btn-lg" id="beginBtn" data-action="begin" disabled>I am ready to begin</button>
+      </div>
+    </main>`;
+  }
+
+  // ---------- exam ----------
+  function renderExam() {
+    const t = getTest(store.session.testId);
+    app.innerHTML = `<div class="exam">
+      <header class="exam-bar">
+        <div class="brand"><span class="seal" aria-hidden="true">GK</span>
+          <div><strong>${t.title}</strong><span>${t.code} · General Knowledge</span></div></div>
+        <div class="timer" id="timer" role="timer"><span class="timer-label">Time left</span><span class="timer-value" id="timerValue">${clock(store.session.endsAt - Date.now())}</span></div>
+      </header>
+      <nav class="section-bar" aria-label="Sections">
+        <div class="section-tabs" id="sectionTabs"></div>
+        <button class="btn ghost palette-toggle" id="paletteToggle" data-action="togglePalette" aria-controls="palette" aria-expanded="false">Palette</button>
+      </nav>
+      <div class="exam-body">
+        <main class="question-pane" id="questionPane"></main>
+        <div class="palette-scrim" id="paletteScrim" data-action="togglePalette" hidden></div>
+        <aside class="palette" id="palette" aria-label="Question palette"></aside>
+      </div>
+      <footer class="exam-actions">
+        <div class="group">
+          <button class="btn review" data-action="markNext">Mark for Review &amp; Next</button>
+          <button class="btn ghost" data-action="clear">Clear Response</button>
+        </div>
+        <div class="group">
+          <button class="btn ghost" id="prevBtn" data-action="prev">← Previous</button>
+          <button class="btn primary" id="nextBtn" data-action="next">Save &amp; Next →</button>
+        </div>
+      </footer>
+    </div>`;
+    paintExam();
+    startTicker();
+  }
+
+  function paintExam() {
+    paintTabs();
+    paintQuestion();
+    paintPalette();
+  }
+
+  function paintTabs() {
+    const s = store.session;
+    const t = getTest(s.testId);
+    const current = t.questions[s.current].section;
+    document.getElementById("sectionTabs").innerHTML = t.sections.map((sec, k) => {
+      let done = 0;
+      for (let i = sec.start; i <= sec.end; i++) if (s.answers[i] != null) done++;
+      return `<button class="tab${k === current ? " is-active" : ""}" data-action="section" data-section="${k}"${k === current ? ' aria-current="true"' : ""}>
+        ${sec.name}<span class="tab-count">${done}/${sizeOf(sec)}</span></button>`;
+    }).join("");
+  }
+
+  function paintQuestion() {
+    const s = store.session;
+    const t = getTest(s.testId);
+    const i = s.current;
+    const q = t.questions[i];
+    const sec = t.sections[q.section];
+    const chosen = s.answers[i];
+    const pane = document.getElementById("questionPane");
+    pane.innerHTML = `<div class="q-wrap">
+      <div class="q-head">
+        <h2 class="q-num">Question ${q.n}</h2>
+        <span class="q-sec">${sec.name} · ${i - sec.start + 1} of ${sizeOf(sec)}</span>
+        <span class="q-marks">+1 mark</span>
+      </div>
+      <p class="q-text" id="qText">${esc(q.text)}</p>
+      <fieldset class="options" aria-labelledby="qText">
+        ${q.options.map((o, k) => `<label class="option${chosen === k ? " is-selected" : ""}">
+          <input type="radio" name="opt" value="${k}"${chosen === k ? " checked" : ""}>
+          <span class="opt-letter">${LETTERS[k]}</span><span class="opt-text">${esc(o)}</span>
+        </label>`).join("")}
+      </fieldset>
+      ${s.marked[i] ? `<p class="q-flag">Marked for review</p>` : ""}
+    </div>`;
+    pane.scrollTop = 0;
+    document.getElementById("prevBtn").disabled = i === 0;
+    document.getElementById("nextBtn").textContent = i === t.questions.length - 1 ? "Save & Submit" : "Save & Next →";
+  }
+
+  function paintPalette() {
+    const s = store.session;
+    const t = getTest(s.testId);
+    const counts = countStatus(0, t.questions.length - 1);
+    const name = CANDIDATE;
+    document.getElementById("palette").innerHTML = `
+      <div class="palette-cand">
+        <span class="avatar" aria-hidden="true">${initial(name)}</span>
+        <div><strong>${esc(name)}</strong><span>${t.code}</span></div>
+        <button class="icon-btn palette-close" data-action="togglePalette" aria-label="Close question palette">×</button>
+      </div>
+      <ul class="legend">${legendItems(counts)}</ul>
+      ${t.sections.map(sec => `<section class="pgroup">
+        <h3>${sec.name}</h3>
+        <div class="pgrid">${range(sec.start, sec.end).map(i => {
+          const st = statusOf(i);
+          const cur = i === s.current;
+          return `<button class="pq st-${st}${cur ? " is-current" : ""}" data-action="goto" data-q="${i}" aria-label="Question ${i + 1}: ${STATUS_LABEL[st]}"${cur ? ' aria-current="true"' : ""}>${i + 1}</button>`;
+        }).join("")}</div>
+      </section>`).join("")}
+      <button class="btn submit" data-action="openSubmit">Submit Test</button>`;
+    const toggle = document.getElementById("paletteToggle");
+    if (toggle) toggle.textContent = `Palette · ${counts.answered + counts["answered-marked"]}/${t.questions.length}`;
+  }
+
+  function setPalette(open) {
+    ui.paletteOpen = open;
+    const exam = document.querySelector(".exam");
+    if (!exam) return;
+    exam.classList.toggle("palette-open", open);
+    document.getElementById("paletteScrim").hidden = !open;
+    document.getElementById("paletteToggle").setAttribute("aria-expanded", String(open));
+  }
+
+  function goTo(i) {
+    const s = store.session;
+    const t = getTest(s.testId);
+    if (i < 0 || i >= t.questions.length) return;
+    s.current = i;
+    s.visited[i] = true;
+    persistSession();
+    setPalette(false);
+    paintExam();
+  }
+
+  function choose(k) {
+    const s = store.session;
+    s.answers[s.current] = k;
+    persistSession();
+    document.querySelectorAll("#questionPane .option").forEach((el, idx) => {
+      el.classList.toggle("is-selected", idx === k);
+      el.querySelector("input").checked = idx === k;
+    });
+    paintTabs();
+    paintPalette();
+  }
+
+  function clearResponse() {
+    delete store.session.answers[store.session.current];
+    persistSession();
+    paintExam();
+  }
+
+  function saveNext() {
+    const s = store.session;
+    const t = getTest(s.testId);
+    delete s.marked[s.current]; // as in real CBT exams, Save & Next confirms the answer and drops the review mark
+    persistSession();
+    if (s.current === t.questions.length - 1) {
+      paintExam();
+      openSubmit();
+    } else {
+      goTo(s.current + 1);
+    }
+  }
+
+  function markNext() {
+    const s = store.session;
+    const t = getTest(s.testId);
+    s.marked[s.current] = true;
+    persistSession();
+    if (s.current === t.questions.length - 1) {
+      paintExam();
+      toast("Marked for review. Use the palette to go back, or submit when you are ready.");
+    } else {
+      goTo(s.current + 1);
+    }
+  }
+
+  function openSubmit() {
+    const s = store.session;
+    const t = getTest(s.testId);
+    const rows = t.sections.map(sec => {
+      const c = countStatus(sec.start, sec.end);
+      return `<tr><th scope="row">${sec.name}</th><td>${sizeOf(sec)}</td><td>${c.answered + c["answered-marked"]}</td>
+        <td>${c["not-answered"]}</td><td>${c.marked + c["answered-marked"]}</td><td>${c["not-visited"]}</td></tr>`;
+    }).join("");
+    const unanswered = t.questions.filter((_, i) => s.answers[i] == null).length;
+    showModal({
+      title: "Submit your test?",
+      body: `<p>You still have <strong>${clock(s.endsAt - Date.now())}</strong> left${unanswered ? ` and <strong>${unanswered}</strong> question${unanswered > 1 ? "s" : ""} without an answer` : ""}. After you submit, you cannot change your answers.</p>
+        <div class="table-wrap"><table class="data summary">
+          <thead><tr><th>Section</th><th>Questions</th><th>Answered</th><th>Not answered</th><th>Marked for review</th><th>Not visited</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>`,
+      actions: [
+        { label: "Back to test", action: "closeModal", kind: "ghost" },
+        { label: "Yes, submit", action: "submit", kind: "primary" }
+      ]
+    });
+  }
+
+  // ---------- result ----------
+  function remarkFor(score, total, name) {
+    const p = score / total;
+    const who = name ? `, ${esc(name)}` : "";
+    if (p >= 0.9) return `Outstanding${who}! You are exam-ready.`;
+    if (p >= 0.75) return `Great work${who}! Revise the few you missed.`;
+    if (p >= 0.5) return `Good effort${who}. Read the solutions, then try again.`;
+    return `Keep practising${who}. Go through every solution carefully, then retake the test.`;
+  }
+
+  function renderResult() {
+    const at = findAttempt(ui.attemptId);
+    if (!at) { ui.view = "home"; return renderHome(); }
+    const t = getTest(at.testId);
+    const r = grade(t, at.answers);
+    const pct = Math.round((r.score / r.total) * 100);
+    const attempted = r.correct + r.wrong;
+    const accuracy = attempted ? Math.round((r.correct / attempted) * 100) : 0;
+    const C = 2 * Math.PI * 52;
+    const band = pct >= 75 ? "high" : pct >= 50 ? "mid" : "low";
+
+    const chapterKeys = Object.keys(CHAPTERS).filter(k => r.chapters[k]);
+    const weakest = chapterKeys
+      .map(k => ({ k, p: r.chapters[k].correct / r.chapters[k].total }))
+      .filter(c => c.p < 1)
+      .sort((a, b) => a.p - b.p)[0];
+
+    return topbar() + `<main class="page result">
+      <section class="scorecard">
+        <svg class="ring band-${band}" viewBox="0 0 120 120" role="img" aria-label="Score ${r.score} out of ${r.total}">
+          <circle cx="60" cy="60" r="52" fill="none" class="ring-track"></circle>
+          <circle cx="60" cy="60" r="52" fill="none" class="ring-fill" stroke-dasharray="${C.toFixed(2)}" stroke-dashoffset="${(C * (1 - pct / 100)).toFixed(2)}" transform="rotate(-90 60 60)"></circle>
+          <text x="60" y="62" text-anchor="middle" class="ring-num">${pct}%</text>
+          <text x="60" y="80" text-anchor="middle" class="ring-sub">SCORE</text>
+        </svg>
+        <div class="score-info">
+          <p class="eyebrow">${t.title} · Result</p>
+          <p class="score-big">${r.score}<span>/${r.total}</span></p>
+          <p class="remark">${remarkFor(r.score, r.total, FIRST_NAME)}</p>
+          <p class="meta">Submitted ${when(at.submittedAt)} · Accuracy ${accuracy}% of attempted questions</p>
+          ${at.auto ? `<span class="auto-note">Submitted automatically when time ran out</span>` : ""}
+        </div>
+      </section>
+
+      <section class="tiles" aria-label="Summary">
+        <div class="tile tile-ok"><span class="k">Correct</span><span class="v">${r.correct}</span></div>
+        <div class="tile tile-bad"><span class="k">Wrong</span><span class="v">${r.wrong}</span></div>
+        <div class="tile tile-idle"><span class="k">Not attempted</span><span class="v">${r.skipped}</span></div>
+        <div class="tile"><span class="k">Time taken</span><span class="v v-sm">${spent(at.timeTaken)}</span></div>
+      </section>
+
+      <div class="actions actions-start">
+        <button class="btn primary btn-lg" data-action="solutions">View solutions</button>
+        <button class="btn ghost btn-lg" data-action="instructions" data-test="${t.id}">Retake test</button>
+        <button class="btn ghost btn-lg" data-action="home">All tests</button>
+      </div>
+
+      <div class="breakdown">
+        <section class="card">
+          <h2>Section-wise score</h2>
+          <div class="table-wrap flat"><table class="data">
+            <thead><tr><th>Section</th><th>Correct</th><th>Wrong</th><th>Skipped</th><th>Score</th></tr></thead>
+            <tbody>${r.sections.map(s => `<tr><th scope="row">${s.name}</th><td class="num">${s.correct}</td><td class="num">${s.wrong}</td><td class="num">${s.skipped}</td><td class="num"><strong>${s.correct}</strong>/${s.total}</td></tr>`).join("")}
+              <tr class="total"><th scope="row">Total</th><td class="num">${r.correct}</td><td class="num">${r.wrong}</td><td class="num">${r.skipped}</td><td class="num"><strong>${r.score}</strong>/${r.total}</td></tr>
+            </tbody></table></div>
+        </section>
+        <section class="card">
+          <h2>Chapter-wise performance</h2>
+          <div class="bars">${chapterKeys.map(k => {
+            const c = r.chapters[k];
+            const p = Math.round((c.correct / c.total) * 100);
+            return `<div class="bar-row">
+              <div class="bar-label"><span>${CHAPTERS[k]}</span><span>${c.correct}/${c.total}</span></div>
+              <div class="bar"><span class="${p < 60 ? "is-weak" : ""}" style="width:${p}%"></span></div>
+            </div>`;
+          }).join("")}</div>
+          ${weakest ? `<p class="tip">Revise first: <strong>${CHAPTERS[weakest.k]}</strong></p>` : `<p class="tip">Full marks in every chapter!</p>`}
+        </section>
+      </div>
+    </main>`;
+  }
+
+  // ---------- solutions ----------
+  function answerState(t, at, i) {
+    if (at.answers[i] == null) return "skipped";
+    return at.answers[i] === t.questions[i].answer ? "correct" : "wrong";
+  }
+
+  function solutionCard(t, at, i) {
+    const q = t.questions[i];
+    const mine = at.answers[i];
+    const st = answerState(t, at, i);
+    const badge = { correct: ["ok", "Correct · +1"], wrong: ["bad", "Wrong · 0"], skipped: ["idle", "Not attempted · 0"] }[st];
+    const opts = q.options.map((o, k) => {
+      const isAnswer = k === q.answer;
+      const isMine = k === mine;
+      let cls = "";
+      let tag = "";
+      if (isAnswer && isMine) { cls = "is-correct"; tag = "✓ Your answer"; }
+      else if (isAnswer) { cls = "is-correct"; tag = "✓ Correct answer"; }
+      else if (isMine) { cls = "is-wrong"; tag = "✗ Your answer"; }
+      return `<li class="${cls}"><span class="opt-letter">${LETTERS[k]}</span><span class="opt-text">${esc(o)}</span>${tag ? `<span class="opt-tag">${tag}</span>` : ""}</li>`;
+    }).join("");
+    return `<li class="sol-card" id="sol-${i}">
+      <div class="sol-top">
+        <span class="sol-num">Q${q.n}</span>
+        <span class="badge badge-${badge[0]}">${badge[1]}</span>
+        <span class="sol-ch">${t.sections[q.section].name} · ${CHAPTERS[q.chapter]}</span>
+      </div>
+      <p class="q-text">${esc(q.text)}</p>
+      <ul class="sol-options">${opts}</ul>
+      <div class="explain"><strong>Explanation</strong><p>${esc(q.explanation)}</p></div>
+    </li>`;
+  }
+
+  function renderSolutions() {
+    const at = findAttempt(ui.attemptId);
+    if (!at) { ui.view = "home"; return renderHome(); }
+    const t = getTest(at.testId);
+    const r = grade(t, at.answers);
+    const filters = [["all", "All", r.total], ["wrong", "Wrong", r.wrong], ["skipped", "Not attempted", r.skipped], ["correct", "Correct", r.correct]];
+    const shown = t.questions.map((_, i) => i).filter(i => ui.filter === "all" || answerState(t, at, i) === ui.filter);
+
+    return topbar() + `<main class="page solutions">
+      <div class="sol-head">
+        <div>
+          <p class="eyebrow">${t.title} · Solutions</p>
+          <h1>You scored ${r.score} out of ${r.total}</h1>
+        </div>
+        <button class="btn ghost" data-action="result" data-attempt="${at.id}">← Back to result</button>
+      </div>
+
+      <section class="card sol-tools">
+        <div class="filters" role="group" aria-label="Show questions">
+          ${filters.map(([key, label, n]) => `<button class="filter" data-action="filter" data-filter="${key}" aria-pressed="${ui.filter === key}">${label}<span class="n">${n}</span></button>`).join("")}
+        </div>
+        <div class="jump" aria-label="Jump to a question">
+          ${t.questions.map((_, i) => `<button class="jq st-${answerState(t, at, i)}" data-action="jump" data-q="${i}" aria-label="Question ${i + 1}: ${answerState(t, at, i) === "skipped" ? "not attempted" : answerState(t, at, i)}">${i + 1}</button>`).join("")}
+        </div>
+        <p class="jump-key"><span><span class="dot st-correct"></span>Correct</span><span><span class="dot st-wrong"></span>Wrong</span><span><span class="dot st-skipped"></span>Not attempted</span></p>
+      </section>
+
+      ${shown.length
+        ? `<ol class="sol-list">${shown.map(i => solutionCard(t, at, i)).join("")}</ol>`
+        : `<p class="empty">No questions in this group${ui.filter === "wrong" ? " – you got none wrong!" : "."}</p>`}
+
+      <div class="actions actions-start">
+        <button class="btn primary" data-action="instructions" data-test="${t.id}">Retake test</button>
+        <button class="btn ghost" data-action="home">All tests</button>
+      </div>
+    </main>`;
+  }
+
+  // ---------- modal and toast ----------
+  function showModal({ title, body, actions }) {
+    closeModal();
+    const wrap = document.createElement("div");
+    wrap.className = "modal-backdrop";
+    wrap.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <h2 id="modalTitle">${title}</h2>
+      <div class="modal-body">${body}</div>
+      <div class="modal-actions">${actions.map(a => `<button class="btn ${a.kind}" data-action="${a.action}">${a.label}</button>`).join("")}</div>
+    </div>`;
+    document.body.appendChild(wrap);
+    const first = wrap.querySelector("button");
+    if (first) first.focus();
+  }
+  function closeModal() {
+    document.querySelectorAll(".modal-backdrop").forEach(m => m.remove());
+  }
+
+  function toast(message) {
+    let el = document.getElementById("toast");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "toast";
+      el.className = "toast";
+      el.setAttribute("role", "status");
+      document.body.appendChild(el);
+    }
+    el.textContent = message;
+    el.classList.add("is-on");
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(() => el.classList.remove("is-on"), 4500);
+  }
+
+  // ---------- rendering ----------
+  function render() {
+    closeModal();
+    if (ui.view === "exam" && !store.session) ui.view = "home";
+    document.body.classList.toggle("in-exam", ui.view === "exam");
+    if (ui.view === "exam") {
+      renderExam();
+      return;
+    }
+    stopTicker();
+    if (ui.view === "instructions") app.innerHTML = renderInstructions();
+    else if (ui.view === "result") app.innerHTML = renderResult();
+    else if (ui.view === "solutions") app.innerHTML = renderSolutions();
+    else app.innerHTML = renderHome();
+    window.scrollTo(0, 0);
+  }
+
+  // ---------- events ----------
+  document.addEventListener("click", e => {
+    const el = e.target.closest("[data-action]");
+    if (!el || el.disabled) return;
+    const s = store.session;
+    switch (el.dataset.action) {
+      case "home":
+        ui.view = "home"; render(); break;
+      case "instructions":
+        if (s) { ui.view = "exam"; render(); break; } // only one running test at a time
+        ui.testId = Number(el.dataset.test); ui.view = "instructions"; render(); break;
+      case "begin":
+        startTest(ui.testId); break;
+      case "resume":
+        ui.view = "exam"; render(); break;
+      case "goto":
+        goTo(Number(el.dataset.q)); break;
+      case "section":
+        goTo(getTest(s.testId).sections[Number(el.dataset.section)].start); break;
+      case "next":
+        saveNext(); break;
+      case "prev":
+        goTo(s.current - 1); break;
+      case "markNext":
+        markNext(); break;
+      case "clear":
+        clearResponse(); break;
+      case "togglePalette":
+        setPalette(!ui.paletteOpen); break;
+      case "openSubmit":
+        setPalette(false); openSubmit(); break;
+      case "submit":
+        submitTest(false); break;
+      case "closeModal":
+        closeModal(); break;
+      case "result":
+        ui.attemptId = Number(el.dataset.attempt); ui.view = "result"; render(); break;
+      case "solutions":
+        ui.filter = "all"; ui.view = "solutions"; render(); break;
+      case "filter":
+        ui.filter = el.dataset.filter; render(); break;
+      case "jump": {
+        const i = Number(el.dataset.q);
+        if (!document.getElementById("sol-" + i)) { ui.filter = "all"; render(); }
+        const card = document.getElementById("sol-" + i);
+        if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
+        break;
+      }
+    }
+  });
+
+  document.addEventListener("change", e => {
+    if (e.target.name === "opt" && store.session) choose(Number(e.target.value));
+    if (e.target.id === "agree") document.getElementById("beginBtn").disabled = !e.target.checked;
+  });
+
+  document.addEventListener("keydown", e => {
+    if (document.querySelector(".modal-backdrop")) {
+      if (e.key === "Escape") closeModal();
+      return;
+    }
+    if (ui.view !== "exam" || !store.session || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "Escape" && ui.paletteOpen) { setPalette(false); return; }
+    if (e.target.type === "radio" && e.key.startsWith("Arrow")) return; // let arrow keys move inside the option group
+    const idx = ["a", "b", "c", "d"].indexOf(e.key.toLowerCase());
+    if (idx >= 0) { e.preventDefault(); choose(idx); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); saveNext(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); goTo(store.session.current - 1); }
+  });
+
+  window.addEventListener("beforeunload", e => {
+    if (ui.view === "exam" && store.session) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
+
+  // ---------- boot ----------
+  if (store.session && !getTest(store.session.testId)) store.session = null;
+  if (store.session) {
+    ui.testId = store.session.testId;
+    if (Date.now() >= store.session.endsAt) {
+      submitTest(true); // time ran out while the page was closed
+    } else {
+      ui.view = "exam";
+      render();
+      toast("Welcome back! Your test has resumed. The timer kept running.");
+    }
+  } else {
+    render();
+  }
+})();
