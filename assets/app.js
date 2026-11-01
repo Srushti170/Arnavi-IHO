@@ -8,6 +8,7 @@
   const ONE_MIN = 60 * 1000;
   const CANDIDATE = "Arnavi Maurya";
   const FIRST_NAME = "Arnavi";
+  const PHOTO = "assets/arnavi.jpg";
   const KEYS = { session: "ihogk.session.v1", attempts: "ihogk.attempts.v1" };
   const LETTERS = ["A", "B", "C", "D"];
   const STATUS_ORDER = ["not-visited", "not-answered", "answered", "marked", "answered-marked"];
@@ -102,7 +103,7 @@
       return {
         n: i + 1,
         section: item.section,
-        chapter: item.c,
+        group: raw.topics ? item.t : item.c,
         text: item.q,
         options,
         answer: options.indexOf(item.a),
@@ -112,8 +113,13 @@
     const countA = raw.sectionA.length;
     return {
       id: raw.id,
+      kind: raw.kind || "mock",
+      number: raw.number,
+      chapter: raw.chapter,
       code: raw.code,
       title: raw.title,
+      // Results break a mock test down by chapter and a chapter test by topic.
+      groups: raw.topics || CHAPTERS,
       questions,
       sections: [
         { name: "Section A", start: 0, end: countA - 1 },
@@ -142,24 +148,27 @@
   function when(ts) {
     return new Date(ts).toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
   }
-  function initial(name) {
-    return esc((name || "?").trim().charAt(0).toUpperCase() || "?");
+  function avatar(extraClass = "") {
+    return `<span class="avatar${extraClass}" aria-hidden="true"><img src="${PHOTO}" alt=""></span>`;
+  }
+  function fullTitle(t) {
+    return t.kind === "chapter" ? `${t.title}: ${CHAPTERS[t.chapter]}` : t.title;
   }
 
   function grade(test, answers) {
     const res = {
       correct: 0, wrong: 0, skipped: 0, total: test.questions.length,
       sections: test.sections.map(s => ({ name: s.name, total: sizeOf(s), correct: 0, wrong: 0, skipped: 0 })),
-      chapters: {}
+      groups: {}
     };
     test.questions.forEach((q, i) => {
       const a = answers[i];
       const sec = res.sections[q.section];
-      const ch = res.chapters[q.chapter] || (res.chapters[q.chapter] = { total: 0, correct: 0 });
-      ch.total++;
-      if (a == null) { res.skipped++; sec.skipped++; }
-      else if (a === q.answer) { res.correct++; sec.correct++; ch.correct++; }
-      else { res.wrong++; sec.wrong++; }
+      const g = res.groups[q.group] || (res.groups[q.group] = { total: 0, correct: 0, wrong: 0, skipped: 0, misses: [] });
+      g.total++;
+      if (a == null) { res.skipped++; sec.skipped++; g.skipped++; g.misses.push(i); }
+      else if (a === q.answer) { res.correct++; sec.correct++; g.correct++; }
+      else { res.wrong++; sec.wrong++; g.wrong++; g.misses.push(i); }
     });
     res.score = res.correct;
     return res;
@@ -269,7 +278,7 @@
     return `<header class="topbar"><div class="topbar-inner">
       <div class="brand"><span class="seal" aria-hidden="true">GK</span>
         <div><strong>IHO General Knowledge</strong><span>Grade III · Practice Tests</span></div></div>
-      <div class="cand-chip"><span class="avatar" aria-hidden="true">${initial(CANDIDATE)}</span><span>${CANDIDATE}</span></div>
+      <div class="cand-chip">${avatar()}<span>${CANDIDATE}</span></div>
     </div></header>`;
   }
 
@@ -278,44 +287,57 @@
   }
 
   // ---------- home ----------
-  function renderHome() {
-    const cards = TESTS.map(t => {
-      const mine = store.attempts.filter(a => a.testId === t.id);
-      const best = mine.reduce((m, a) => Math.max(m, a.score), 0);
-      const last = mine[mine.length - 1];
-      const live = store.session && store.session.testId === t.id;
-      const total = t.questions.length;
-      let status = `<span class="pill">Not attempted</span>`;
-      if (live) status = `<span class="pill pill-live">In progress · ${clock(store.session.endsAt - Date.now())} left</span>`;
-      else if (mine.length) status = `<span class="pill pill-done">Best ${best}/${total} · ${mine.length} attempt${mine.length > 1 ? "s" : ""}</span>`;
-      return `<article class="test-card">
-        <div class="test-card-top"><span class="test-code">${t.code}</span>${status}</div>
-        <h3>${t.title}</h3>
-        <dl class="test-facts">
-          <div><dt>Questions</dt><dd>${total}</dd></div>
-          <div><dt>Marks</dt><dd>${total}</dd></div>
-          <div><dt>Time</dt><dd>40 min</dd></div>
-        </dl>
-        <p class="test-split">${t.sections.map(s => `${s.name}: ${sizeOf(s)}`).join(" · ")}</p>
-        <div class="test-actions">
-          ${live
-            ? `<button class="btn primary" data-action="resume">Resume test</button>`
-            : `<button class="btn primary" data-action="instructions" data-test="${t.id}">${mine.length ? "Retake test" : "Start test"}</button>`}
-          ${last ? `<button class="btn ghost" data-action="result" data-attempt="${last.id}">Last result</button>` : ""}
-        </div>
+  function testCard(t) {
+    const mine = store.attempts.filter(a => a.testId === t.id);
+    const best = mine.reduce((m, a) => Math.max(m, a.score), 0);
+    const last = mine[mine.length - 1];
+    const live = store.session && store.session.testId === t.id;
+    const total = t.questions.length;
+    let status = `<span class="pill">Not attempted</span>`;
+    if (live) status = `<span class="pill pill-live">In progress · ${clock(store.session.endsAt - Date.now())} left</span>`;
+    else if (mine.length) status = `<span class="pill pill-done">Best ${best}/${total} · ${mine.length} attempt${mine.length > 1 ? "s" : ""}</span>`;
+    const actions = `<div class="test-actions">
+        ${live
+        ? `<button class="btn primary" data-action="resume">Resume test</button>`
+        : `<button class="btn primary" data-action="instructions" data-test="${t.id}">${mine.length ? "Retake test" : "Start test"}</button>`}
+        ${last ? `<button class="btn ghost" data-action="result" data-attempt="${last.id}">Last result</button>` : ""}
+      </div>`;
+    if (t.kind === "chapter") {
+      return `<article class="test-card chapter-card">
+        <span class="test-code">${t.code}</span>
+        <div><p class="chapter-no">Chapter ${t.number}</p><h3>${CHAPTERS[t.chapter]}</h3></div>
+        ${status}
+        <p class="test-split">${total} questions · 40 min · ${t.sections.map(s => `${s.name.replace("Section ", "")}: ${sizeOf(s)}`).join(" · ")}</p>
+        ${actions}
       </article>`;
-    }).join("");
+    }
+    return `<article class="test-card">
+      <div class="test-card-top"><span class="test-code">${t.code}</span>${status}</div>
+      <h3>${t.title}</h3>
+      <dl class="test-facts">
+        <div><dt>Questions</dt><dd>${total}</dd></div>
+        <div><dt>Marks</dt><dd>${total}</dd></div>
+        <div><dt>Time</dt><dd>40 min</dd></div>
+      </dl>
+      <p class="test-split">${t.sections.map(s => `${s.name}: ${sizeOf(s)}`).join(" · ")}</p>
+      ${actions}
+    </article>`;
+  }
+
+  function renderHome() {
+    const mockCards = TESTS.filter(t => t.kind !== "chapter").map(testCard).join("");
+    const chapterCards = TESTS.filter(t => t.kind === "chapter").map(testCard).join("");
 
     const recent = store.attempts.slice().reverse().slice(0, 8);
     const history = recent.length
       ? `<div class="table-wrap"><table class="data">
           <thead><tr><th>Date</th><th>Test</th><th>Score</th><th>Time taken</th><th><span class="sr-only">Result</span></th></tr></thead>
           <tbody>${recent.map(a => {
-            const t = getTest(a.testId);
-            return `<tr><td>${when(a.submittedAt)}</td><td>${t ? t.title : "Test"}</td>
+        const t = getTest(a.testId);
+        return `<tr><td>${when(a.submittedAt)}</td><td>${t ? fullTitle(t) : "Test"}</td>
               <td class="num"><strong>${a.score}</strong>/${a.total}</td><td class="num">${spent(a.timeTaken)}</td>
               <td class="row-action"><button class="link" data-action="result" data-attempt="${a.id}">View</button></td></tr>`;
-          }).join("")}</tbody></table></div>`
+      }).join("")}</tbody></table></div>`
       : `<p class="empty">Your scores will appear here after you finish a test.</p>`;
 
     return topbar() + `<main class="page home">
@@ -323,10 +345,10 @@
         <div>
           <p class="eyebrow">Grade III · General Knowledge</p>
           <h1>Ready for practice, ${FIRST_NAME}?</h1>
-          <p class="lead">Three full mock tests made from your study notes. Each one runs like the real exam: 40 questions, a 40-minute timer, a question palette and instant results with solutions.</p>
+          
         </div>
         <div class="cand-card">
-          <span class="avatar avatar-lg" aria-hidden="true">${initial(CANDIDATE)}</span>
+          ${avatar(" avatar-lg")}
           <div>
             <span class="k">Candidate</span>
             <strong>${CANDIDATE}</strong>
@@ -343,16 +365,19 @@
       </section>
 
       <section class="block">
-        <h2>Mock tests</h2>
-        <div class="tests">${cards}</div>
+        <div class="block-head">
+          <h2>Mock tests</h2>
+          <p>Questions from the whole book, like the real exam. Section A: Chapters 1–4 · Section B: Chapter 5 (IQEA).</p>
+        </div>
+        <div class="tests">${mockCards}</div>
       </section>
 
       <section class="block">
-        <h2>Chapters covered</h2>
-        <ul class="syllabus">
-          <li><strong>Section A</strong> ${["india", "world", "sports", "science"].map(k => `<span class="chip">${CHAPTERS[k]}</span>`).join("")}</li>
-          <li><strong>Section B</strong> <span class="chip">${CHAPTERS.iqea}: emergency numbers, healthy habits, mental maths, brain teasers</span></li>
-        </ul>
+        <div class="block-head">
+          <h2>Chapter-wise tests</h2>
+          <p>All 40 questions from one chapter. Same timer and rules; Section B has the trickier questions.</p>
+        </div>
+        <div class="tests tests-chapters">${chapterCards}</div>
       </section>
 
       <section class="block">
@@ -375,7 +400,7 @@
         <dl class="admit-grid">
           <div><dt>Candidate</dt><dd>${CANDIDATE}</dd></div>
           <div><dt>Test</dt><dd>${t.title}</dd></div>
-          <div><dt>Subject</dt><dd>General Knowledge · Grade III</dd></div>
+          <div><dt>Subject</dt><dd>${t.kind === "chapter" ? `Chapter ${t.number}: ${CHAPTERS[t.chapter]}` : "General Knowledge · Grade III"}</dd></div>
           <div><dt>Duration</dt><dd>40 minutes</dd></div>
           <div><dt>Questions</dt><dd>${t.questions.length} (A: ${sizeOf(secA)}, B: ${sizeOf(secB)})</dd></div>
           <div><dt>Maximum marks</dt><dd>${t.questions.length}</dd></div>
@@ -386,7 +411,7 @@
         <section class="card">
           <h2>General instructions</h2>
           <ol class="rules">
-            <li>The test has ${t.questions.length} questions. <strong>Section A</strong> has ${sizeOf(secA)} questions and <strong>Section B</strong> has ${sizeOf(secB)} questions.</li>
+            <li>The test has ${t.questions.length} questions. <strong>Section A</strong> has ${sizeOf(secA)} questions and <strong>Section B</strong> has ${sizeOf(secB)} questions.${t.kind === "chapter" ? ` All of them come from <strong>Chapter ${t.number}: ${CHAPTERS[t.chapter]}</strong>, and Section B has the trickier ones.` : ""}</li>
             <li>Each question carries <strong>1 mark</strong>. There is no negative marking in this practice test.</li>
             <li>Every question has four options (A, B, C, D). Only one option is correct.</li>
             <li>You have <strong>40 minutes</strong>. The timer at the top right shows the time left. When it reaches 00:00, the test is submitted automatically.</li>
@@ -423,7 +448,7 @@
     app.innerHTML = `<div class="exam">
       <header class="exam-bar">
         <div class="brand"><span class="seal" aria-hidden="true">GK</span>
-          <div><strong>${t.title}</strong><span>${t.code} · General Knowledge</span></div></div>
+          <div><strong>${t.title}</strong><span>${t.code} · ${t.kind === "chapter" ? CHAPTERS[t.chapter] : "General Knowledge"}</span></div></div>
         <div class="timer" id="timer" role="timer"><span class="timer-label">Time left</span><span class="timer-value" id="timerValue">${clock(store.session.endsAt - Date.now())}</span></div>
       </header>
       <nav class="section-bar" aria-label="Sections">
@@ -503,7 +528,7 @@
     const name = CANDIDATE;
     document.getElementById("palette").innerHTML = `
       <div class="palette-cand">
-        <span class="avatar" aria-hidden="true">${initial(name)}</span>
+        ${avatar()}
         <div><strong>${esc(name)}</strong><span>${t.code}</span></div>
         <button class="icon-btn palette-close" data-action="togglePalette" aria-label="Close question palette">×</button>
       </div>
@@ -511,10 +536,10 @@
       ${t.sections.map(sec => `<section class="pgroup">
         <h3>${sec.name}</h3>
         <div class="pgrid">${range(sec.start, sec.end).map(i => {
-          const st = statusOf(i);
-          const cur = i === s.current;
-          return `<button class="pq st-${st}${cur ? " is-current" : ""}" data-action="goto" data-q="${i}" aria-label="Question ${i + 1}: ${STATUS_LABEL[st]}"${cur ? ' aria-current="true"' : ""}>${i + 1}</button>`;
-        }).join("")}</div>
+      const st = statusOf(i);
+      const cur = i === s.current;
+      return `<button class="pq st-${st}${cur ? " is-current" : ""}" data-action="goto" data-q="${i}" aria-label="Question ${i + 1}: ${STATUS_LABEL[st]}"${cur ? ' aria-current="true"' : ""}>${i + 1}</button>`;
+    }).join("")}</div>
       </section>`).join("")}
       <button class="btn submit" data-action="openSubmit">Submit Test</button>`;
     const toggle = document.getElementById("paletteToggle");
@@ -628,11 +653,42 @@
     const C = 2 * Math.PI * 52;
     const band = pct >= 75 ? "high" : pct >= 50 ? "mid" : "low";
 
-    const chapterKeys = Object.keys(CHAPTERS).filter(k => r.chapters[k]);
-    const weakest = chapterKeys
-      .map(k => ({ k, p: r.chapters[k].correct / r.chapters[k].total }))
-      .filter(c => c.p < 1)
-      .sort((a, b) => a.p - b.p)[0];
+    // Rank chapters (topics, in a chapter test) from weakest to strongest.
+    const per = t.kind === "chapter" ? "topic" : "chapter";
+    const LEVEL = { weak: "Needs work", mid: "Getting there", strong: "Strong" };
+    const rows = Object.keys(t.groups).filter(k => r.groups[k]).map(k => {
+      const g = r.groups[k];
+      const p = Math.round((g.correct / g.total) * 100);
+      return { key: k, label: t.groups[k], ...g, p, level: p >= 80 ? "strong" : p >= 50 ? "mid" : "weak" };
+    }).sort((a, b) => a.p - b.p || b.total - a.total);
+    const focus = rows.filter(x => x.level !== "strong").slice(0, 2);
+    let headline;
+    if (focus.length) headline = `Work on <strong>${focus[0].label}</strong> first${focus[1] ? `, then <strong>${focus[1].label}</strong>` : ""}.`;
+    else if (rows.every(x => x.p === 100)) headline = `Full marks in every ${per}. Brilliant!`;
+    else headline = `You are strong in every ${per}. Keep revising to stay sharp.`;
+
+    const reviewRow = x => {
+      const practice = t.kind !== "chapter" && x.level !== "strong"
+        ? TESTS.find(c => c.kind === "chapter" && c.chapter === x.key) : null;
+      const misses = x.misses.map(i => {
+        const q = t.questions[i];
+        const mine = at.answers[i];
+        return `<li><span class="miss-q">Q${q.n}. ${esc(q.text)}</span>
+          <span class="miss-a">${mine == null ? "Not attempted" : `Your answer: ${esc(q.options[mine])}`} · <strong>Correct: ${esc(q.options[q.answer])}</strong></span></li>`;
+      }).join("");
+      return `<li class="review-row">
+        <div class="review-main">
+          <div class="review-title"><span class="review-name">${x.label}</span><span class="level-chip lv-${x.level}">${LEVEL[x.level]}</span></div>
+          <div class="bar"><span class="lv-${x.level}" style="width:${x.p}%"></span></div>
+          <p class="review-stats">${x.correct} of ${x.total} correct · ${x.wrong} wrong · ${x.skipped} not attempted</p>
+        </div>
+        <div class="review-side">
+          <span class="review-pct">${x.p}%</span>
+          ${practice ? `<button class="btn ghost btn-sm" data-action="instructions" data-test="${practice.id}">Practise Chapter ${practice.number} test</button>` : ""}
+        </div>
+        ${x.misses.length ? `<details class="review-misses"><summary>Show the ${x.misses.length} question${x.misses.length > 1 ? "s" : ""} to revise</summary><ul>${misses}</ul></details>` : ""}
+      </li>`;
+    };
 
     return topbar() + `<main class="page result">
       <section class="scorecard">
@@ -643,9 +699,10 @@
           <text x="60" y="80" text-anchor="middle" class="ring-sub">SCORE</text>
         </svg>
         <div class="score-info">
-          <p class="eyebrow">${t.title} · Result</p>
+          <p class="eyebrow">${fullTitle(t)} · Result</p>
           <p class="score-big">${r.score}<span>/${r.total}</span></p>
           <p class="remark">${remarkFor(r.score, r.total, FIRST_NAME)}</p>
+          ${focus.length ? `<p class="focus-line">Weakest ${per}: <strong>${focus[0].label}</strong> (${focus[0].p}%). See the ${per} review below.</p>` : ""}
           <p class="meta">Submitted ${when(at.submittedAt)} · Accuracy ${accuracy}% of attempted questions</p>
           ${at.auto ? `<span class="auto-note">Submitted automatically when time ran out</span>` : ""}
         </div>
@@ -665,6 +722,14 @@
       </div>
 
       <div class="breakdown">
+        <section class="card review">
+          <div class="block-head">
+            <h2>${per === "topic" ? "Topic" : "Chapter"} review</h2>
+            <p>From weakest to strongest</p>
+          </div>
+          <p class="review-headline">${headline}</p>
+          <ol class="review-list">${rows.map(reviewRow).join("")}</ol>
+        </section>
         <section class="card">
           <h2>Section-wise score</h2>
           <div class="table-wrap flat"><table class="data">
@@ -672,18 +737,6 @@
             <tbody>${r.sections.map(s => `<tr><th scope="row">${s.name}</th><td class="num">${s.correct}</td><td class="num">${s.wrong}</td><td class="num">${s.skipped}</td><td class="num"><strong>${s.correct}</strong>/${s.total}</td></tr>`).join("")}
               <tr class="total"><th scope="row">Total</th><td class="num">${r.correct}</td><td class="num">${r.wrong}</td><td class="num">${r.skipped}</td><td class="num"><strong>${r.score}</strong>/${r.total}</td></tr>
             </tbody></table></div>
-        </section>
-        <section class="card">
-          <h2>Chapter-wise performance</h2>
-          <div class="bars">${chapterKeys.map(k => {
-            const c = r.chapters[k];
-            const p = Math.round((c.correct / c.total) * 100);
-            return `<div class="bar-row">
-              <div class="bar-label"><span>${CHAPTERS[k]}</span><span>${c.correct}/${c.total}</span></div>
-              <div class="bar"><span class="${p < 60 ? "is-weak" : ""}" style="width:${p}%"></span></div>
-            </div>`;
-          }).join("")}</div>
-          ${weakest ? `<p class="tip">Revise first: <strong>${CHAPTERS[weakest.k]}</strong></p>` : `<p class="tip">Full marks in every chapter!</p>`}
         </section>
       </div>
     </main>`;
@@ -714,7 +767,7 @@
       <div class="sol-top">
         <span class="sol-num">Q${q.n}</span>
         <span class="badge badge-${badge[0]}">${badge[1]}</span>
-        <span class="sol-ch">${t.sections[q.section].name} · ${CHAPTERS[q.chapter]}</span>
+        <span class="sol-ch">${t.sections[q.section].name} · ${t.groups[q.group]}</span>
       </div>
       <p class="q-text">${esc(q.text)}</p>
       <ul class="sol-options">${opts}</ul>
@@ -733,7 +786,7 @@
     return topbar() + `<main class="page solutions">
       <div class="sol-head">
         <div>
-          <p class="eyebrow">${t.title} · Solutions</p>
+          <p class="eyebrow">${fullTitle(t)} · Solutions</p>
           <h1>You scored ${r.score} out of ${r.total}</h1>
         </div>
         <button class="btn ghost" data-action="result" data-attempt="${at.id}">← Back to result</button>
