@@ -8,7 +8,7 @@
   const ONE_MIN = 60 * 1000;
   const CANDIDATE = "Arnavi Maurya";
   const FIRST_NAME = "Arnavi";
-  const PHOTO = "assets/arnavi.jpg";
+  const PHOTO = "assets/arnavi.jpg?v=2"; // bump v after replacing the photo so browsers skip the cached copy
   const KEYS = { session: "ihogk.session.v1", attempts: "ihogk.attempts.v1" };
   const LETTERS = ["A", "B", "C", "D"];
   const STATUS_ORDER = ["not-visited", "not-answered", "answered", "marked", "answered-marked"];
@@ -21,6 +21,8 @@
   };
 
   const CHAPTERS = window.IHO_DATA.chapters;
+  const CHAPTER_KEYS = Object.keys(CHAPTERS);
+  const STUDY = window.IHO_STUDY || {};
   const TESTS = window.IHO_DATA.tests.map(buildTest);
   const app = document.getElementById("app");
 
@@ -46,7 +48,7 @@
   };
   if (!Array.isArray(store.attempts)) store.attempts = [];
 
-  const ui = { view: "home", testId: null, attemptId: null, filter: "all", paletteOpen: false };
+  const ui = { view: "home", testId: null, attemptId: null, filter: "all", paletteOpen: false, studyChapter: CHAPTER_KEYS[0], studyQuiz: false };
   let ticker = null;
   let warned = {};
 
@@ -151,6 +153,12 @@
   function avatar(extraClass = "") {
     return `<span class="avatar${extraClass}" aria-hidden="true"><img src="${PHOTO}" alt=""></span>`;
   }
+  // Results are shown from the attempt's own copy of the questions when it has one
+  // (attempts saved before that copy existed fall back to the current test).
+  function testOf(at) {
+    const t = getTest(at.testId);
+    return at.questions ? { ...t, questions: at.questions } : t;
+  }
   function fullTitle(t) {
     return t.kind === "chapter" ? `${t.title}: ${CHAPTERS[t.chapter]}` : t.title;
   }
@@ -221,6 +229,7 @@
       answers,
       score: grade(t, answers).score,
       total: t.questions.length,
+      questions: t.questions, // the questions exactly as she saw them, so later edits never change this result
       auto: !!auto
     };
     store.attempts.push(attempt);
@@ -274,10 +283,12 @@
   }
 
   // ---------- shared pieces ----------
-  function topbar() {
+  function topbar(active = "tests") {
+    const link = (key, label, action) => `<button class="navlink${active === key ? " is-active" : ""}" data-action="${action}"${active === key ? ' aria-current="page"' : ""}>${label}</button>`;
     return `<header class="topbar"><div class="topbar-inner">
       <div class="brand"><span class="seal" aria-hidden="true">GK</span>
         <div><strong>IHO General Knowledge</strong><span>Grade III · Practice Tests</span></div></div>
+      <nav class="mainnav" aria-label="Main">${link("tests", "Tests", "home")}${link("study", "Study", "study")}</nav>
       <div class="cand-chip">${avatar()}<span>${CANDIDATE}</span></div>
     </div></header>`;
   }
@@ -645,7 +656,7 @@
   function renderResult() {
     const at = findAttempt(ui.attemptId);
     if (!at) { ui.view = "home"; return renderHome(); }
-    const t = getTest(at.testId);
+    const t = testOf(at);
     const r = grade(t, at.answers);
     const pct = Math.round((r.score / r.total) * 100);
     const attempted = r.correct + r.wrong;
@@ -685,6 +696,9 @@
         <div class="review-side">
           <span class="review-pct">${x.p}%</span>
           ${practice ? `<button class="btn ghost btn-sm" data-action="instructions" data-test="${practice.id}">Practise Chapter ${practice.number} test</button>` : ""}
+          ${x.level === "strong" ? "" : t.kind === "chapter"
+            ? `<button class="btn ghost btn-sm" data-action="study" data-chapter="${t.chapter}" data-topic="${x.key}">Study this topic</button>`
+            : `<button class="btn ghost btn-sm" data-action="study" data-chapter="${x.key}">Study Chapter ${CHAPTER_KEYS.indexOf(x.key) + 1}</button>`}
         </div>
         ${x.misses.length ? `<details class="review-misses"><summary>Show the ${x.misses.length} question${x.misses.length > 1 ? "s" : ""} to revise</summary><ul>${misses}</ul></details>` : ""}
       </li>`;
@@ -778,7 +792,7 @@
   function renderSolutions() {
     const at = findAttempt(ui.attemptId);
     if (!at) { ui.view = "home"; return renderHome(); }
-    const t = getTest(at.testId);
+    const t = testOf(at);
     const r = grade(t, at.answers);
     const filters = [["all", "All", r.total], ["wrong", "Wrong", r.wrong], ["skipped", "Not attempted", r.skipped], ["correct", "Correct", r.correct]];
     const shown = t.questions.map((_, i) => i).filter(i => ui.filter === "all" || answerState(t, at, i) === ui.filter);
@@ -809,6 +823,81 @@
       <div class="actions actions-start">
         <button class="btn primary" data-action="instructions" data-test="${t.id}">Retake test</button>
         <button class="btn ghost" data-action="home">All tests</button>
+      </div>
+    </main>`;
+  }
+
+  // ---------- study ----------
+  // Every question on the site for one chapter, grouped by topic: the chapter test first, then the mock tests.
+  function studyQuestions(chapter) {
+    const byTopic = {};
+    TESTS.forEach((t, ti) => {
+      const raw = window.IHO_DATA.tests[ti];
+      const items = raw.sectionA.concat(raw.sectionB);
+      t.questions.forEach((q, i) => {
+        if ((items[i].c || raw.chapter) !== chapter) return;
+        (byTopic[items[i].t] || (byTopic[items[i].t] = [])).push({ q, source: `${t.title} · Q${q.n}`, fromChapterTest: t.kind === "chapter" });
+      });
+    });
+    Object.values(byTopic).forEach(list => list.sort((a, b) => b.fromChapterTest - a.fromChapterTest));
+    return byTopic;
+  }
+
+  const sectionId = s => "study-" + (s.topic || "intro");
+
+  function qaItem({ q, source }) {
+    return `<li class="qa">
+      <div class="qa-top"><p class="qa-q">${esc(q.text)}</p><span class="qa-src">${source}</span></div>
+      <ul class="qa-opts">${q.options.map((o, k) => `<li${k === q.answer ? ' class="is-answer"' : ""}><b>${LETTERS[k]}</b>${esc(o)}</li>`).join("")}</ul>
+      <p class="qa-a"><strong>Answer: ${LETTERS[q.answer]}. ${esc(q.options[q.answer])}</strong> – ${esc(q.explanation)}</p>
+      <button class="btn ghost btn-sm qa-reveal" data-action="reveal">Show answer</button>
+    </li>`;
+  }
+
+  function studySection(s, list) {
+    return `<section class="study-section" id="${sectionId(s)}">
+      <h2>${s.title}</h2>
+      <div class="notes">${s.html}</div>
+      ${list.length ? `<div class="qa-block">
+        <h3>Questions &amp; answers <span class="qa-count">${list.length}</span></h3>
+        <ol class="qa-list">${list.map(qaItem).join("")}</ol>
+      </div>` : ""}
+    </section>`;
+  }
+
+  function renderStudy() {
+    const key = CHAPTERS[ui.studyChapter] ? ui.studyChapter : CHAPTER_KEYS[0];
+    const n = CHAPTER_KEYS.indexOf(key) + 1;
+    const notes = STUDY[key] || { intro: "", sections: [] };
+    const qa = studyQuestions(key);
+    const total = Object.values(qa).reduce((sum, list) => sum + list.length, 0);
+    const test = TESTS.find(t => t.kind === "chapter" && t.chapter === key);
+    return topbar("study") + `<main class="page study${ui.studyQuiz ? " quiz" : ""}">
+      <div class="study-layout">
+        <nav class="study-nav" aria-label="Chapters">
+          ${CHAPTER_KEYS.map((k, i) => `<button class="study-link${k === key ? " is-active" : ""}" data-action="study" data-chapter="${k}"${k === key ? ' aria-current="page"' : ""}>
+            <span class="chapter-no">Chapter ${i + 1}</span>${CHAPTERS[k]}</button>`).join("")}
+        </nav>
+        <div class="study-main">
+          <header class="study-head">
+            <div>
+              <p class="eyebrow">Study · Chapter ${n}</p>
+              <h1>${CHAPTERS[key]}</h1>
+              <p class="lead">${notes.intro}</p>
+            </div>
+            ${test ? `<button class="btn primary" data-action="instructions" data-test="${test.id}">Take Chapter ${n} test</button>` : ""}
+          </header>
+          <section class="card study-tools" aria-label="In this chapter">
+            <div class="topic-chips">${notes.sections.map(s => `<button class="topic-chip" data-action="studyJump" data-target="${sectionId(s)}">${s.title}</button>`).join("")}</div>
+            <div class="quiz-toggle" role="group" aria-label="Answers">
+              <span>Answers</span>
+              <button class="filter" data-action="studyQuiz" data-quiz="0" aria-pressed="${!ui.studyQuiz}">Show</button>
+              <button class="filter" data-action="studyQuiz" data-quiz="1" aria-pressed="${ui.studyQuiz}">Hide – quiz me</button>
+            </div>
+            <p class="muted">Full notes for every topic, then all ${total} questions from the Chapter ${n} test and the mock tests, with answers.</p>
+          </section>
+          ${notes.sections.map(s => studySection(s, qa[s.topic] || [])).join("")}
+        </div>
       </div>
     </main>`;
   }
@@ -859,6 +948,7 @@
     if (ui.view === "instructions") app.innerHTML = renderInstructions();
     else if (ui.view === "result") app.innerHTML = renderResult();
     else if (ui.view === "solutions") app.innerHTML = renderSolutions();
+    else if (ui.view === "study") app.innerHTML = renderStudy();
     else app.innerHTML = renderHome();
     window.scrollTo(0, 0);
   }
@@ -904,6 +994,29 @@
         ui.filter = "all"; ui.view = "solutions"; render(); break;
       case "filter":
         ui.filter = el.dataset.filter; render(); break;
+      case "study": {
+        ui.view = "study";
+        if (el.dataset.chapter) ui.studyChapter = el.dataset.chapter;
+        render();
+        const target = el.dataset.topic && document.getElementById("study-" + el.dataset.topic);
+        if (target) target.scrollIntoView({ block: "start" });
+        break;
+      }
+      case "studyJump": {
+        const target = document.getElementById(el.dataset.target);
+        if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+        break;
+      }
+      case "studyQuiz": {
+        ui.studyQuiz = el.dataset.quiz === "1";
+        const page = document.querySelector(".study");
+        page.classList.toggle("quiz", ui.studyQuiz);
+        page.querySelectorAll(".qa.revealed").forEach(item => item.classList.remove("revealed"));
+        page.querySelectorAll("[data-action=studyQuiz]").forEach(b => b.setAttribute("aria-pressed", String((b.dataset.quiz === "1") === ui.studyQuiz)));
+        break;
+      }
+      case "reveal":
+        el.closest(".qa").classList.add("revealed"); break;
       case "jump": {
         const i = Number(el.dataset.q);
         if (!document.getElementById("sol-" + i)) { ui.filter = "all"; render(); }
