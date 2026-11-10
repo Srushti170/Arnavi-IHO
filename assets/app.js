@@ -3,7 +3,6 @@
 (() => {
   "use strict";
 
-  const DURATION_MS = 40 * 60 * 1000;
   const FIVE_MIN = 5 * 60 * 1000;
   const ONE_MIN = 60 * 1000;
   const CANDIDATE = "Arnavi Maurya";
@@ -23,6 +22,7 @@
   const CHAPTERS = window.IHO_DATA.chapters;
   const CHAPTER_KEYS = Object.keys(CHAPTERS);
   const STUDY = window.IHO_STUDY || {};
+  const PICS = window.IHO_PICS || {};
   const TESTS = window.IHO_DATA.tests.map(buildTest);
   const app = document.getElementById("app");
 
@@ -79,10 +79,12 @@
   function buildTest(raw) {
     const rand = mulberry32(raw.id * 7919 + 17);
     const items = raw.sectionA.map(q => ({ ...q, section: 0 }))
-      .concat(raw.sectionB.map(q => ({ ...q, section: 1 })));
-    // Numeric options stay in ascending order; the other questions fill A–D so that each letter
-    // is the correct answer about equally often. The same test always shows the same order.
+      .concat((raw.sectionB || []).map(q => ({ ...q, section: 1 })));
+    // Options given in a fixed order (`o`, e.g. with "All of the above" last) and numeric options stay put;
+    // the other questions fill A–D so that each letter is the correct answer about equally often.
+    // The same test always shows the same order.
     const sorted = items.map(item => {
+      if (item.o) return item.o.slice();
       const all = [item.a, ...item.w];
       if (!all.every(s => !Number.isNaN(firstNumber(s)))) return null;
       return all.sort((x, y) => firstNumber(x) - firstNumber(y));
@@ -107,26 +109,29 @@
         section: item.section,
         group: raw.topics ? item.t : item.c,
         text: item.q,
+        img: item.img || null,
         options,
         answer: options.indexOf(item.a),
         explanation: item.e
       };
     });
     const countA = raw.sectionA.length;
+    const sections = [{ name: raw.sectionName || "Section A", start: 0, end: countA - 1 }];
+    if (questions.length > countA) sections.push({ name: "Section B", start: countA, end: questions.length - 1 });
     return {
       id: raw.id,
       kind: raw.kind || "mock",
+      subject: raw.subject || "General Knowledge",
       number: raw.number,
       chapter: raw.chapter,
       code: raw.code,
       title: raw.title,
-      // Results break a mock test down by chapter and a chapter test by topic.
+      note: raw.note || "",
+      minutes: raw.minutes || 40,
+      // Results break a GK mock test down by chapter; chapter and maths tests by topic.
       groups: raw.topics || CHAPTERS,
       questions,
-      sections: [
-        { name: "Section A", start: 0, end: countA - 1 },
-        { name: "Section B", start: countA, end: questions.length - 1 }
-      ]
+      sections
     };
   }
 
@@ -159,6 +164,19 @@
     const t = getTest(at.testId);
     return at.questions ? { ...t, questions: at.questions } : t;
   }
+  // Pictures: a question's `img`, or an option written as "pic:key" (see pictures.js).
+  const isPic = o => typeof o === "string" && o.startsWith("pic:");
+  function picHTML(key, cls = "") {
+    const p = PICS[key];
+    return p ? `<span class="pic ${cls}" role="img" aria-label="${esc(p.alt)}">${p.svg}</span>` : "";
+  }
+  const optText = o => (isPic(o) ? (PICS[o.slice(4)] || { alt: "Picture" }).alt : o);
+  const optHTML = (o, cls) => (isPic(o) ? picHTML(o.slice(4), cls) : esc(o));
+  const figure = (q, cls = "q-fig") => (q.img ? `<figure class="${cls}">${picHTML(q.img)}</figure>` : "");
+  const picGrid = q => (q.options.every(isPic) ? " pic-grid" : "");
+  // Maths tests live under the Maths tab; everything else under GK Tests.
+  const navFor = t => (t.kind === "maths" ? "maths" : "tests");
+  const backAction = t => (t.kind === "maths" ? "maths" : "home");
   function fullTitle(t) {
     return t.kind === "chapter" ? `${t.title}: ${CHAPTERS[t.chapter]}` : t.title;
   }
@@ -203,7 +221,7 @@
 
   function startTest(testId) {
     const now = Date.now();
-    store.session = { testId, startedAt: now, endsAt: now + DURATION_MS, current: 0, answers: {}, marked: {}, visited: { 0: true } };
+    store.session = { testId, startedAt: now, endsAt: now + getTest(testId).minutes * 60 * 1000, current: 0, answers: {}, marked: {}, visited: { 0: true } };
     warned = {};
     persistSession();
     ui.view = "exam";
@@ -244,7 +262,7 @@
     if (auto) {
       showModal({
         title: "Time is up!",
-        body: "<p>Your 40 minutes are over, so your answers were submitted automatically.</p>",
+        body: `<p>Your ${t.minutes} minutes are over, so your answers were submitted automatically.</p>`,
         actions: [{ label: "See my result", action: "closeModal", kind: "primary" }]
       });
     }
@@ -286,9 +304,9 @@
   function topbar(active = "tests") {
     const link = (key, label, action) => `<button class="navlink${active === key ? " is-active" : ""}" data-action="${action}"${active === key ? ' aria-current="page"' : ""}>${label}</button>`;
     return `<header class="topbar"><div class="topbar-inner">
-      <div class="brand"><span class="seal" aria-hidden="true">GK</span>
-        <div><strong>IHO General Knowledge</strong><span>Grade III · Practice Tests</span></div></div>
-      <nav class="mainnav" aria-label="Main">${link("tests", "Tests", "home")}${link("study", "Study", "study")}</nav>
+      <div class="brand"><span class="seal" aria-hidden="true">G3</span>
+        <div><strong>IHO Olympiad Practice</strong><span>Grade III · GK &amp; Maths</span></div></div>
+      <nav class="mainnav" aria-label="Main">${link("tests", "GK Tests", "home")}${link("study", "Study", "study")}${link("maths", "Maths", "maths")}</nav>
       <div class="cand-chip">${avatar()}<span>${CANDIDATE}</span></div>
     </div></header>`;
   }
@@ -318,45 +336,44 @@
         <span class="test-code">${t.code}</span>
         <div><p class="chapter-no">Chapter ${t.number}</p><h3>${CHAPTERS[t.chapter]}</h3></div>
         ${status}
-        <p class="test-split">${total} questions · 40 min · ${t.sections.map(s => `${s.name.replace("Section ", "")}: ${sizeOf(s)}`).join(" · ")}</p>
+        <p class="test-split">${total} questions · ${t.minutes} min · ${t.sections.map(s => `${s.name.replace("Section ", "")}: ${sizeOf(s)}`).join(" · ")}</p>
         ${actions}
       </article>`;
     }
     return `<article class="test-card">
       <div class="test-card-top"><span class="test-code">${t.code}</span>${status}</div>
       <h3>${t.title}</h3>
+      ${t.note ? `<p class="test-note">${t.note}</p>` : ""}
       <dl class="test-facts">
         <div><dt>Questions</dt><dd>${total}</dd></div>
         <div><dt>Marks</dt><dd>${total}</dd></div>
-        <div><dt>Time</dt><dd>40 min</dd></div>
+        <div><dt>Time</dt><dd>${t.minutes} min</dd></div>
       </dl>
-      <p class="test-split">${t.sections.map(s => `${s.name}: ${sizeOf(s)}`).join(" · ")}</p>
+      <p class="test-split">${t.sections.length > 1 ? t.sections.map(s => `${s.name}: ${sizeOf(s)}`).join(" · ") : `${total} questions in one section`}</p>
       ${actions}
     </article>`;
   }
 
-  function renderHome() {
-    const mockCards = TESTS.filter(t => t.kind !== "chapter").map(testCard).join("");
-    const chapterCards = TESTS.filter(t => t.kind === "chapter").map(testCard).join("");
+  // Recent attempts for one subject (maths or GK), newest first.
+  function historyTable(maths) {
+    const recent = store.attempts.filter(a => {
+      const t = getTest(a.testId);
+      return t && (t.kind === "maths") === maths;
+    }).reverse().slice(0, 8);
+    if (!recent.length) return `<p class="empty">Your scores will appear here after you finish a test.</p>`;
+    return `<div class="table-wrap"><table class="data">
+      <thead><tr><th>Date</th><th>Test</th><th>Score</th><th>Time taken</th><th><span class="sr-only">Result</span></th></tr></thead>
+      <tbody>${recent.map(a => `<tr><td>${when(a.submittedAt)}</td><td>${fullTitle(getTest(a.testId))}</td>
+          <td class="num"><strong>${a.score}</strong>/${a.total}</td><td class="num">${spent(a.timeTaken)}</td>
+          <td class="row-action"><button class="link" data-action="result" data-attempt="${a.id}">View</button></td></tr>`).join("")}</tbody>
+    </table></div>`;
+  }
 
-    const recent = store.attempts.slice().reverse().slice(0, 8);
-    const history = recent.length
-      ? `<div class="table-wrap"><table class="data">
-          <thead><tr><th>Date</th><th>Test</th><th>Score</th><th>Time taken</th><th><span class="sr-only">Result</span></th></tr></thead>
-          <tbody>${recent.map(a => {
-        const t = getTest(a.testId);
-        return `<tr><td>${when(a.submittedAt)}</td><td>${t ? fullTitle(t) : "Test"}</td>
-              <td class="num"><strong>${a.score}</strong>/${a.total}</td><td class="num">${spent(a.timeTaken)}</td>
-              <td class="row-action"><button class="link" data-action="result" data-attempt="${a.id}">View</button></td></tr>`;
-      }).join("")}</tbody></table></div>`
-      : `<p class="empty">Your scores will appear here after you finish a test.</p>`;
-
-    return topbar() + `<main class="page home">
-      <section class="welcome">
+  function welcome(eyebrow, heading) {
+    return `<section class="welcome">
         <div>
-          <p class="eyebrow">Grade III · General Knowledge</p>
-          <h1>Ready for practice, ${FIRST_NAME}?</h1>
-          
+          <p class="eyebrow">${eyebrow}</p>
+          <h1>${heading}</h1>
         </div>
         <div class="cand-card">
           ${avatar(" avatar-lg")}
@@ -366,7 +383,45 @@
             <span class="s">Grade III · ${store.attempts.length} test${store.attempts.length === 1 ? "" : "s"} taken</span>
           </div>
         </div>
+      </section>`;
+  }
+
+  function renderMaths() {
+    const cards = TESTS.filter(t => t.kind === "maths").map(testCard).join("");
+    return topbar("maths") + `<main class="page home">
+      ${welcome("Grade III · Mathematics", `Maths practice, ${FIRST_NAME}`)}
+
+      <section class="pattern" aria-label="Exam pattern">
+        <div><span class="k">Questions</span><span class="v">40</span><span class="s">One section, numbered 1–40</span></div>
+        <div><span class="k">Marks</span><span class="v">40</span><span class="s">1 mark per question</span></div>
+        <div><span class="k">Time</span><span class="v">1 hour</span><span class="s">Like the real paper · submits itself at 00:00</span></div>
+        <div><span class="k">Options</span><span class="v">4</span><span class="s">(A) to (D), only one is correct</span></div>
       </section>
+
+      <section class="block">
+        <div class="block-head">
+          <h2>Maths tests</h2>
+          <p>Made like the school's IHO Grade 3 maths sample paper: numbers, + − × ÷, length, weight and capacity, money, time and calendar, and word puzzles. Keep rough paper and a pencil ready.</p>
+        </div>
+        <div class="tests">${cards}</div>
+      </section>
+
+      <section class="block">
+        <h2>Recent maths attempts</h2>
+        ${historyTable(true)}
+      </section>
+
+      <p class="footnote">Unofficial practice tests in the style of the school's sample paper. Scores are saved only in this browser.</p>
+    </main>`;
+  }
+
+  function renderHome() {
+    const mockCards = TESTS.filter(t => t.kind === "mock").map(testCard).join("");
+    const chapterCards = TESTS.filter(t => t.kind === "chapter").map(testCard).join("");
+    const history = historyTable(false);
+
+    return topbar() + `<main class="page home">
+      ${welcome("Grade III · General Knowledge", `Ready for practice, ${FIRST_NAME}?`)}
 
       <section class="pattern" aria-label="Exam pattern">
         <div><span class="k">Questions</span><span class="v">40</span><span class="s">Section A 30 · Section B 10</span></div>
@@ -378,9 +433,9 @@
       <section class="block">
         <div class="block-head">
           <h2>Mock tests</h2>
-          <p>Questions from the whole book, like the real exam. Section A: Chapters 1–4 · Section B: Chapter 5 (IQEA).</p>
+          <p>Mock Tests 1–3 follow the notes (Section A: Chapters 1–4 · Section B: Chapter 5). Mock Tests 4–5 follow the school's sample paper, with picture questions, general awareness and reasoning.</p>
         </div>
-        <div class="tests">${mockCards}</div>
+        <div class="tests tests-five">${mockCards}</div>
       </section>
 
       <section class="block">
@@ -388,7 +443,7 @@
           <h2>Chapter-wise tests</h2>
           <p>All 40 questions from one chapter. Same timer and rules; Section B has the trickier questions.</p>
         </div>
-        <div class="tests tests-chapters">${chapterCards}</div>
+        <div class="tests tests-five">${chapterCards}</div>
       </section>
 
       <section class="block">
@@ -404,16 +459,18 @@
   function renderInstructions() {
     const t = getTest(ui.testId);
     const [secA, secB] = t.sections;
-    return topbar() + `<main class="page instructions">
-      <div><button class="link" data-action="home">← All tests</button></div>
+    const maths = t.kind === "maths";
+    const subject = t.kind === "chapter" ? `Chapter ${t.number}: ${CHAPTERS[t.chapter]}` : `${t.subject} · Grade III`;
+    return topbar(navFor(t)) + `<main class="page instructions">
+      <div><button class="link" data-action="${backAction(t)}">← All tests</button></div>
       <section class="admit" aria-label="Admit card">
         <div class="admit-head"><span>Admit card</span><span class="test-code">${t.code}</span></div>
         <dl class="admit-grid">
           <div><dt>Candidate</dt><dd>${CANDIDATE}</dd></div>
           <div><dt>Test</dt><dd>${t.title}</dd></div>
-          <div><dt>Subject</dt><dd>${t.kind === "chapter" ? `Chapter ${t.number}: ${CHAPTERS[t.chapter]}` : "General Knowledge · Grade III"}</dd></div>
-          <div><dt>Duration</dt><dd>40 minutes</dd></div>
-          <div><dt>Questions</dt><dd>${t.questions.length} (A: ${sizeOf(secA)}, B: ${sizeOf(secB)})</dd></div>
+          <div><dt>Subject</dt><dd>${subject}</dd></div>
+          <div><dt>Duration</dt><dd>${t.minutes} minutes</dd></div>
+          <div><dt>Questions</dt><dd>${t.questions.length}${secB ? ` (A: ${sizeOf(secA)}, B: ${sizeOf(secB)})` : ""}</dd></div>
           <div><dt>Maximum marks</dt><dd>${t.questions.length}</dd></div>
         </dl>
       </section>
@@ -422,11 +479,11 @@
         <section class="card">
           <h2>General instructions</h2>
           <ol class="rules">
-            <li>The test has ${t.questions.length} questions. <strong>Section A</strong> has ${sizeOf(secA)} questions and <strong>Section B</strong> has ${sizeOf(secB)} questions.${t.kind === "chapter" ? ` All of them come from <strong>Chapter ${t.number}: ${CHAPTERS[t.chapter]}</strong>, and Section B has the trickier ones.` : ""}</li>
+            <li>The test has ${t.questions.length} questions.${secB ? ` <strong>Section A</strong> has ${sizeOf(secA)} questions and <strong>Section B</strong> has ${sizeOf(secB)} questions.` : ""}${t.kind === "chapter" ? ` All of them come from <strong>Chapter ${t.number}: ${CHAPTERS[t.chapter]}</strong>, and Section B has the trickier ones.` : ""}${maths ? " Keep rough paper and a pencil ready to work out the answers." : ""}</li>
             <li>Each question carries <strong>1 mark</strong>. There is no negative marking in this practice test.</li>
             <li>Every question has four options (A, B, C, D). Only one option is correct.</li>
-            <li>You have <strong>40 minutes</strong>. The timer at the top right shows the time left. When it reaches 00:00, the test is submitted automatically.</li>
-            <li>Move between questions with <strong>Previous</strong> and <strong>Save &amp; Next</strong>, the section tabs, or by clicking a number in the question palette.</li>
+            <li>You have <strong>${t.minutes} minutes</strong>. The timer at the top right shows the time left. When it reaches 00:00, the test is submitted automatically.</li>
+            <li>Move between questions with <strong>Previous</strong> and <strong>Save &amp; Next</strong>${secB ? ", the section tabs," : ""} or by clicking a number in the question palette.</li>
             <li>Your answer is saved as soon as you click an option. Click <strong>Clear Response</strong> to remove it.</li>
             <li>Click <strong>Mark for Review &amp; Next</strong> to come back to a question later. Marked questions that have an answer are still counted. <strong>Save &amp; Next</strong> removes the review mark.</li>
             <li>Click <strong>Submit Test</strong> when you finish. You will see your score straight away, with the correct answer and an explanation for every question.</li>
@@ -447,7 +504,7 @@
 
       <label class="agree" for="agree"><input type="checkbox" id="agree"> I have read the instructions. I will not look at my notes or books during the test.</label>
       <div class="actions">
-        <button class="btn ghost" data-action="home">Back</button>
+        <button class="btn ghost" data-action="${backAction(t)}">Back</button>
         <button class="btn primary btn-lg" id="beginBtn" data-action="begin" disabled>I am ready to begin</button>
       </div>
     </main>`;
@@ -458,8 +515,8 @@
     const t = getTest(store.session.testId);
     app.innerHTML = `<div class="exam">
       <header class="exam-bar">
-        <div class="brand"><span class="seal" aria-hidden="true">GK</span>
-          <div><strong>${t.title}</strong><span>${t.code} · ${t.kind === "chapter" ? CHAPTERS[t.chapter] : "General Knowledge"}</span></div></div>
+        <div class="brand"><span class="seal" aria-hidden="true">${t.kind === "maths" ? "MA" : "GK"}</span>
+          <div><strong>${t.title}</strong><span>${t.code} · ${t.kind === "chapter" ? CHAPTERS[t.chapter] : t.subject}</span></div></div>
         <div class="timer" id="timer" role="timer"><span class="timer-label">Time left</span><span class="timer-value" id="timerValue">${clock(store.session.endsAt - Date.now())}</span></div>
       </header>
       <nav class="section-bar" aria-label="Sections">
@@ -519,10 +576,11 @@
         <span class="q-marks">+1 mark</span>
       </div>
       <p class="q-text" id="qText">${esc(q.text)}</p>
-      <fieldset class="options" aria-labelledby="qText">
+      ${figure(q)}
+      <fieldset class="options${picGrid(q)}" aria-labelledby="qText">
         ${q.options.map((o, k) => `<label class="option${chosen === k ? " is-selected" : ""}">
           <input type="radio" name="opt" value="${k}"${chosen === k ? " checked" : ""}>
-          <span class="opt-letter">${LETTERS[k]}</span><span class="opt-text">${esc(o)}</span>
+          <span class="opt-letter">${LETTERS[k]}</span><span class="opt-text">${optHTML(o, "opt-pic")}</span>
         </label>`).join("")}
       </fieldset>
       ${s.marked[i] ? `<p class="q-flag">Marked for review</p>` : ""}
@@ -665,7 +723,7 @@
     const band = pct >= 75 ? "high" : pct >= 50 ? "mid" : "low";
 
     // Rank chapters (topics, in a chapter test) from weakest to strongest.
-    const per = t.kind === "chapter" ? "topic" : "chapter";
+    const per = t.kind === "mock" ? "chapter" : "topic";
     const LEVEL = { weak: "Needs work", mid: "Getting there", strong: "Strong" };
     const rows = Object.keys(t.groups).filter(k => r.groups[k]).map(k => {
       const g = r.groups[k];
@@ -679,13 +737,13 @@
     else headline = `You are strong in every ${per}. Keep revising to stay sharp.`;
 
     const reviewRow = x => {
-      const practice = t.kind !== "chapter" && x.level !== "strong"
+      const practice = t.kind === "mock" && x.level !== "strong"
         ? TESTS.find(c => c.kind === "chapter" && c.chapter === x.key) : null;
       const misses = x.misses.map(i => {
         const q = t.questions[i];
         const mine = at.answers[i];
         return `<li><span class="miss-q">Q${q.n}. ${esc(q.text)}</span>
-          <span class="miss-a">${mine == null ? "Not attempted" : `Your answer: ${esc(q.options[mine])}`} · <strong>Correct: ${esc(q.options[q.answer])}</strong></span></li>`;
+          <span class="miss-a">${mine == null ? "Not attempted" : `Your answer: ${esc(optText(q.options[mine]))}`} · <strong>Correct: ${esc(optText(q.options[q.answer]))}</strong></span></li>`;
       }).join("");
       return `<li class="review-row">
         <div class="review-main">
@@ -696,7 +754,7 @@
         <div class="review-side">
           <span class="review-pct">${x.p}%</span>
           ${practice ? `<button class="btn ghost btn-sm" data-action="instructions" data-test="${practice.id}">Practise Chapter ${practice.number} test</button>` : ""}
-          ${x.level === "strong" ? "" : t.kind === "chapter"
+          ${x.level === "strong" || t.kind === "maths" ? "" : t.kind === "chapter"
             ? `<button class="btn ghost btn-sm" data-action="study" data-chapter="${t.chapter}" data-topic="${x.key}">Study this topic</button>`
             : `<button class="btn ghost btn-sm" data-action="study" data-chapter="${x.key}">Study Chapter ${CHAPTER_KEYS.indexOf(x.key) + 1}</button>`}
         </div>
@@ -704,7 +762,7 @@
       </li>`;
     };
 
-    return topbar() + `<main class="page result">
+    return topbar(navFor(t)) + `<main class="page result">
       <section class="scorecard">
         <svg class="ring band-${band}" viewBox="0 0 120 120" role="img" aria-label="Score ${r.score} out of ${r.total}">
           <circle cx="60" cy="60" r="52" fill="none" class="ring-track"></circle>
@@ -732,7 +790,7 @@
       <div class="actions actions-start">
         <button class="btn primary btn-lg" data-action="solutions">View solutions</button>
         <button class="btn ghost btn-lg" data-action="instructions" data-test="${t.id}">Retake test</button>
-        <button class="btn ghost btn-lg" data-action="home">All tests</button>
+        <button class="btn ghost btn-lg" data-action="${backAction(t)}">All tests</button>
       </div>
 
       <div class="breakdown">
@@ -775,7 +833,7 @@
       if (isAnswer && isMine) { cls = "is-correct"; tag = "✓ Your answer"; }
       else if (isAnswer) { cls = "is-correct"; tag = "✓ Correct answer"; }
       else if (isMine) { cls = "is-wrong"; tag = "✗ Your answer"; }
-      return `<li class="${cls}"><span class="opt-letter">${LETTERS[k]}</span><span class="opt-text">${esc(o)}</span>${tag ? `<span class="opt-tag">${tag}</span>` : ""}</li>`;
+      return `<li class="${cls}"><span class="opt-letter">${LETTERS[k]}</span><span class="opt-text">${optHTML(o, "sol-pic")}</span>${tag ? `<span class="opt-tag">${tag}</span>` : ""}</li>`;
     }).join("");
     return `<li class="sol-card" id="sol-${i}">
       <div class="sol-top">
@@ -784,7 +842,8 @@
         <span class="sol-ch">${t.sections[q.section].name} · ${t.groups[q.group]}</span>
       </div>
       <p class="q-text">${esc(q.text)}</p>
-      <ul class="sol-options">${opts}</ul>
+      ${figure(q)}
+      <ul class="sol-options${picGrid(q)}">${opts}</ul>
       <div class="explain"><strong>Explanation</strong><p>${esc(q.explanation)}</p></div>
     </li>`;
   }
@@ -797,7 +856,7 @@
     const filters = [["all", "All", r.total], ["wrong", "Wrong", r.wrong], ["skipped", "Not attempted", r.skipped], ["correct", "Correct", r.correct]];
     const shown = t.questions.map((_, i) => i).filter(i => ui.filter === "all" || answerState(t, at, i) === ui.filter);
 
-    return topbar() + `<main class="page solutions">
+    return topbar(navFor(t)) + `<main class="page solutions">
       <div class="sol-head">
         <div>
           <p class="eyebrow">${fullTitle(t)} · Solutions</p>
@@ -822,7 +881,7 @@
 
       <div class="actions actions-start">
         <button class="btn primary" data-action="instructions" data-test="${t.id}">Retake test</button>
-        <button class="btn ghost" data-action="home">All tests</button>
+        <button class="btn ghost" data-action="${backAction(t)}">All tests</button>
       </div>
     </main>`;
   }
@@ -848,8 +907,9 @@
   function qaItem({ q, source }) {
     return `<li class="qa">
       <div class="qa-top"><p class="qa-q">${esc(q.text)}</p><span class="qa-src">${source}</span></div>
-      <ul class="qa-opts">${q.options.map((o, k) => `<li${k === q.answer ? ' class="is-answer"' : ""}><b>${LETTERS[k]}</b>${esc(o)}</li>`).join("")}</ul>
-      <p class="qa-a"><strong>Answer: ${LETTERS[q.answer]}. ${esc(q.options[q.answer])}</strong> – ${esc(q.explanation)}</p>
+      ${figure(q, "q-fig qa-fig")}
+      <ul class="qa-opts">${q.options.map((o, k) => `<li${k === q.answer ? ' class="is-answer"' : ""}><b>${LETTERS[k]}</b>${optHTML(o, "qa-pic")}</li>`).join("")}</ul>
+      <p class="qa-a"><strong>Answer: ${LETTERS[q.answer]}. ${esc(optText(q.options[q.answer]))}</strong> – ${esc(q.explanation)}</p>
       <button class="btn ghost btn-sm qa-reveal" data-action="reveal">Show answer</button>
     </li>`;
   }
@@ -949,6 +1009,7 @@
     else if (ui.view === "result") app.innerHTML = renderResult();
     else if (ui.view === "solutions") app.innerHTML = renderSolutions();
     else if (ui.view === "study") app.innerHTML = renderStudy();
+    else if (ui.view === "maths") app.innerHTML = renderMaths();
     else app.innerHTML = renderHome();
     window.scrollTo(0, 0);
   }
@@ -961,6 +1022,8 @@
     switch (el.dataset.action) {
       case "home":
         ui.view = "home"; render(); break;
+      case "maths":
+        ui.view = "maths"; render(); break;
       case "instructions":
         if (s) { ui.view = "exam"; render(); break; } // only one running test at a time
         ui.testId = Number(el.dataset.test); ui.view = "instructions"; render(); break;
