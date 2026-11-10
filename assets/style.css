@@ -190,6 +190,40 @@ h1 { font-size: clamp(1.55rem, 3.2vw, 2.25rem); line-height: 1.15; font-weight: 
   background: var(--surface);
 }
 .footnote { padding-top: 16px; border-top: 1px solid var(--line); font-size: 0.8rem; color: var(--muted); }
+
+/* Move or back up results: text on the left, the two buttons on the right; stacks on narrow screens. */
+.backup {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px 24px;
+  padding: 18px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.backup h2 { font-size: 1.05rem; }
+.backup-text p { margin-top: 4px; font-size: 0.9rem; color: var(--muted); line-height: 1.55; max-width: 70ch; }
+.backup-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+@media (max-width: 760px) {
+  .backup { grid-template-columns: minmax(0, 1fr); }
+}
+.code-box {
+  width: 100%;
+  font: 0.78rem/1.45 var(--font-mono);
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 10px 12px;
+  resize: vertical;
+  word-break: break-all;
+}
+.code-box:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.load-alt { display: grid; gap: 10px; }
+.load-alt summary { cursor: pointer; color: var(--accent); font-size: 0.9rem; width: fit-content; }
+.load-alt[open] { gap: 10px; }
+.load-alt[open] summary { margin-bottom: 10px; }
+.load-alt .btn { justify-self: start; margin-top: 10px; }
 .actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
 .actions-start { justify-content: flex-start; }
 

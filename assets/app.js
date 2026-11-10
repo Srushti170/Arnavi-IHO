@@ -386,6 +386,198 @@
       </section>`;
   }
 
+  // ---------- moving results to another site ----------
+  // Results live in each website's own browser storage, so a new link starts empty.
+  // "Save my results" writes every attempt to a file; "Load results" on the new site adds them back.
+  // Loading only ever adds attempts (matched by id); it never removes or changes one that is already here.
+  const BACKUP_APP = "iho-gk-results";
+  // Inside a claude.ai artifact, files are saved through the viewer's "downloads" capability.
+  const downloadsReady = window.claude && typeof window.claude.use === "function"
+    ? Promise.resolve(window.claude.use("downloads")).catch(() => null)
+    : Promise.resolve(null);
+
+  function backupBlock() {
+    const n = store.attempts.length;
+    return `<section class="block backup" aria-labelledby="backupTitle">
+        <div class="backup-text">
+          <h2 id="backupTitle">Move or back up results</h2>
+          <p>Results are kept in this browser, for this website only. Moving to a new link or another computer? Save them to a file here, then load that file on the new site. Loading only adds results; it never removes any.</p>
+        </div>
+        <div class="backup-actions">
+          <button class="btn ghost" data-action="saveResults"${n ? "" : " disabled"}>Save my results (${n})</button>
+          <button class="btn ghost" data-action="loadResults">Load results from a file</button>
+        </div>
+      </section>`;
+  }
+
+  async function saveResults() {
+    const n = store.attempts.length;
+    if (!n) return;
+    const data = JSON.stringify({ app: BACKUP_APP, version: 1, candidate: CANDIDATE, savedAt: Date.now(), attempts: store.attempts });
+    const d = new Date();
+    const filename = `arnavi-results-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.json`;
+    const done = `Saved ${n} result${n === 1 ? "" : "s"} to ${filename}. On the new site, choose "Load results from a file".`;
+    if (window.claude) {
+      const downloads = await downloadsReady;
+      if (!downloads) { showCode(data); return; }
+      try {
+        await downloads.save({ filename, data });
+        toast(done);
+      } catch (err) {
+        const code = err && err.code;
+        if (code === "declined") toast("Not saved.");
+        else if (code === "rate_limited") toast("Please try again in a moment.");
+        else showCode(data);
+      }
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    toast(done);
+  }
+
+  // Fallback when this view cannot save files: show the same data as text to copy and paste.
+  function showCode(data) {
+    showModal({
+      title: "Copy your results",
+      body: `<p>Files can't be saved here, so copy this code instead. On the new site, choose <strong>Load results from a file</strong>, open <strong>Have a code instead?</strong> and paste it.</p>
+        <textarea class="code-box" id="resultsOut" rows="6" readonly aria-label="Results code">${esc(data)}</textarea>`,
+      actions: [{ label: "Copy code", action: "copyResults", kind: "primary" }, { label: "Close", action: "closeModal", kind: "ghost" }]
+    });
+  }
+  function copyResults() {
+    const box = document.getElementById("resultsOut");
+    if (!box) return;
+    box.focus();
+    box.select();
+    const copied = () => toast("Code copied. Paste it on the new site.");
+    const byCommand = () => {
+      let ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { /* not supported */ }
+      if (ok) copied(); else toast("The code is selected: press Ctrl+C to copy it.");
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(box.value).then(copied, byCommand);
+    else byCommand();
+  }
+
+  function openLoad() {
+    showModal({
+      title: "Load saved results",
+      body: `<p>Choose the file you saved on the old link (its name starts with <strong>arnavi-results</strong>). Results already on this site are kept.</p>
+        <div><button class="btn primary" data-action="pickResults">Choose file</button>
+        <input type="file" id="resultsFile" accept=".json,application/json" hidden></div>
+        <details class="load-alt"><summary>Have a code instead?</summary>
+          <textarea class="code-box" id="resultsIn" rows="5" aria-label="Paste the results code"></textarea>
+          <button class="btn ghost" data-action="pasteResults">Add these results</button>
+        </details>`,
+      actions: [{ label: "Close", action: "closeModal", kind: "ghost" }]
+    });
+  }
+
+  const isNum = v => typeof v === "number" && Number.isFinite(v);
+  const isStr = v => typeof v === "string";
+  const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+  // A copied attempt keeps its own questions only if they have the same shape as this site's test;
+  // otherwise its result is shown from the current test, as for attempts saved before copies existed.
+  function cleanQuestions(list, t) {
+    if (!Array.isArray(list) || list.length !== t.questions.length) return null;
+    const out = [];
+    for (let i = 0; i < list.length; i++) {
+      const q = list[i];
+      if (!q || !isStr(q.text) || !isStr(q.explanation)) return null;
+      if (!Array.isArray(q.options) || q.options.length !== 4 || !q.options.every(isStr)) return null;
+      if (!Number.isInteger(q.answer) || q.answer < 0 || q.answer > 3) return null;
+      if (!Number.isInteger(q.section) || !t.sections[q.section]) return null;
+      if (!isStr(q.group) || !has(t.groups, q.group)) return null;
+      if (q.img != null && !(isStr(q.img) && has(PICS, q.img))) return null;
+      out.push({ n: i + 1, section: q.section, group: q.group, text: q.text, img: q.img || null, options: q.options.slice(), answer: q.answer, explanation: q.explanation });
+    }
+    return out;
+  }
+  function cleanAttempt(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const t = getTest(raw.testId);
+    if (!t || !isNum(raw.id) || !isNum(raw.submittedAt) || !Array.isArray(raw.answers)) return null;
+    const questions = cleanQuestions(raw.questions, t);
+    const qs = questions || t.questions;
+    if (raw.answers.length !== qs.length) return null;
+    const answers = raw.answers.map(a => (Number.isInteger(a) && a >= 0 && a < 4 ? a : null));
+    const timeTaken = isNum(raw.timeTaken) ? raw.timeTaken : (isNum(raw.startedAt) ? raw.submittedAt - raw.startedAt : 0);
+    const score = Number.isInteger(raw.score) && raw.score >= 0 && raw.score <= qs.length
+      ? raw.score : grade({ ...t, questions: qs }, answers).score;
+    const at = {
+      id: raw.id,
+      testId: t.id,
+      name: CANDIDATE,
+      startedAt: isNum(raw.startedAt) ? raw.startedAt : raw.submittedAt - timeTaken,
+      submittedAt: raw.submittedAt,
+      timeTaken,
+      answers,
+      score,
+      total: qs.length
+    };
+    if (questions) at.questions = questions;
+    at.auto = !!raw.auto;
+    return at;
+  }
+
+  function importResults(text) {
+    let data = null;
+    try { data = JSON.parse(String(text).trim()); } catch (e) { /* not JSON */ }
+    if (!data || data.app !== BACKUP_APP || !Array.isArray(data.attempts)) {
+      showModal({
+        title: "That didn't work",
+        body: `<p>Please choose the file made by <strong>Save my results</strong> (its name starts with arnavi-results), or paste its whole code.</p>`,
+        actions: [{ label: "Try again", action: "loadResults", kind: "primary" }, { label: "Close", action: "closeModal", kind: "ghost" }]
+      });
+      return;
+    }
+    const before = store.attempts.slice();
+    const seen = new Set(before.map(a => a.id));
+    let added = 0, already = 0, unreadable = 0;
+    data.attempts.forEach(raw => {
+      const at = cleanAttempt(raw);
+      if (!at) { unreadable++; return; }
+      if (seen.has(at.id)) { already++; return; }
+      seen.add(at.id);
+      store.attempts.push(at);
+      added++;
+    });
+    if (added) {
+      store.attempts.sort((a, b) => a.submittedAt - b.submittedAt || a.id - b.id);
+      save(KEYS.attempts, store.attempts);
+      const kept = load(KEYS.attempts, null);
+      if (!Array.isArray(kept) || kept.length !== store.attempts.length) {
+        // Could not be stored (storage full or blocked): put everything back as it was.
+        store.attempts = before;
+        save(KEYS.attempts, before);
+        showModal({
+          title: "Couldn't save here",
+          body: `<p>This browser would not store the results, so nothing was changed. Try a normal (not private) window.</p>`,
+          actions: [{ label: "OK", action: "closeModal", kind: "primary" }]
+        });
+        return;
+      }
+    }
+    render();
+    const plural = k => `${k} result${k === 1 ? "" : "s"}`;
+    const notes = [];
+    if (already) notes.push(`${plural(already)} ${already === 1 ? "was" : "were"} already here, so ${already === 1 ? "it was" : "they were"} skipped.`);
+    if (unreadable) notes.push(`${plural(unreadable)} could not be read.`);
+    showModal({
+      title: added ? `Added ${plural(added)}` : "Nothing new to add",
+      body: `<p>${added ? `${FIRST_NAME}'s past scores, answers and solutions are now on this site, under Recent attempts.` : "Every result in this file is already on this site."}</p>${notes.map(x => `<p>${x}</p>`).join("")}`,
+      actions: [{ label: "OK", action: "closeModal", kind: "primary" }]
+    });
+  }
+
   function renderMaths() {
     const cards = TESTS.filter(t => t.kind === "maths").map(testCard).join("");
     return topbar("maths") + `<main class="page home">
@@ -410,6 +602,8 @@
         <h2>Recent maths attempts</h2>
         ${historyTable(true)}
       </section>
+
+      ${backupBlock()}
 
       <p class="footnote">Unofficial practice tests in the style of the school's sample paper. Scores are saved only in this browser.</p>
     </main>`;
@@ -450,6 +644,8 @@
         <h2>Recent attempts</h2>
         ${history}
       </section>
+
+      ${backupBlock()}
 
       <p class="footnote">Unofficial practice tests made from the Grade III IHO General Knowledge study notes. Scores are saved only in this browser.</p>
     </main>`;
@@ -1080,6 +1276,23 @@
       }
       case "reveal":
         el.closest(".qa").classList.add("revealed"); break;
+      case "saveResults":
+        saveResults(); break;
+      case "copyResults":
+        copyResults(); break;
+      case "loadResults":
+        openLoad(); break;
+      case "pickResults": {
+        const input = document.getElementById("resultsFile");
+        if (input) input.click();
+        break;
+      }
+      case "pasteResults": {
+        const box = document.getElementById("resultsIn");
+        if (box && box.value.trim()) importResults(box.value);
+        else if (box) box.focus();
+        break;
+      }
       case "jump": {
         const i = Number(el.dataset.q);
         if (!document.getElementById("sol-" + i)) { ui.filter = "all"; render(); }
@@ -1093,6 +1306,12 @@
   document.addEventListener("change", e => {
     if (e.target.name === "opt" && store.session) choose(Number(e.target.value));
     if (e.target.id === "agree") document.getElementById("beginBtn").disabled = !e.target.checked;
+    if (e.target.id === "resultsFile" && e.target.files && e.target.files[0]) {
+      const reader = new FileReader();
+      reader.onload = () => importResults(reader.result);
+      reader.onerror = () => toast("That file could not be opened.");
+      reader.readAsText(e.target.files[0]);
+    }
   });
 
   document.addEventListener("keydown", e => {
